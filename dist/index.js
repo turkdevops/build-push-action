@@ -49,6 +49,13 @@ module.exports =
 /************************************************************************/
 /******/ ({
 
+/***/ 4:
+/***/ (function(module) {
+
+module.exports = require("child_process");
+
+/***/ }),
+
 /***/ 8:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -1987,15 +1994,12 @@ const debug = __webpack_require__(427)
 const { MAX_LENGTH, MAX_SAFE_INTEGER } = __webpack_require__(293)
 const { re, t } = __webpack_require__(523)
 
+const parseOptions = __webpack_require__(785)
 const { compareIdentifiers } = __webpack_require__(463)
 class SemVer {
   constructor (version, options) {
-    if (!options || typeof options !== 'object') {
-      options = {
-        loose: !!options,
-        includePrerelease: false
-      }
-    }
+    options = parseOptions(options)
+
     if (version instanceof SemVer) {
       if (version.loose === !!options.loose &&
           version.includePrerelease === !!options.includePrerelease) {
@@ -2277,6 +2281,22 @@ module.exports = SemVer
 
 /***/ }),
 
+/***/ 91:
+/***/ (function(module) {
+
+"use strict";
+
+module.exports = function (Yallist) {
+  Yallist.prototype[Symbol.iterator] = function* () {
+    for (let walker = this.head; walker; walker = walker.next) {
+      yield walker.value
+    }
+  }
+}
+
+
+/***/ }),
+
 /***/ 98:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -2451,9 +2471,344 @@ try {
 /***/ }),
 
 /***/ 129:
-/***/ (function(module) {
+/***/ (function(module, __unusedexports, __webpack_require__) {
 
-module.exports = require("child_process");
+"use strict";
+
+
+// A linked list to keep track of recently-used-ness
+const Yallist = __webpack_require__(665)
+
+const MAX = Symbol('max')
+const LENGTH = Symbol('length')
+const LENGTH_CALCULATOR = Symbol('lengthCalculator')
+const ALLOW_STALE = Symbol('allowStale')
+const MAX_AGE = Symbol('maxAge')
+const DISPOSE = Symbol('dispose')
+const NO_DISPOSE_ON_SET = Symbol('noDisposeOnSet')
+const LRU_LIST = Symbol('lruList')
+const CACHE = Symbol('cache')
+const UPDATE_AGE_ON_GET = Symbol('updateAgeOnGet')
+
+const naiveLength = () => 1
+
+// lruList is a yallist where the head is the youngest
+// item, and the tail is the oldest.  the list contains the Hit
+// objects as the entries.
+// Each Hit object has a reference to its Yallist.Node.  This
+// never changes.
+//
+// cache is a Map (or PseudoMap) that matches the keys to
+// the Yallist.Node object.
+class LRUCache {
+  constructor (options) {
+    if (typeof options === 'number')
+      options = { max: options }
+
+    if (!options)
+      options = {}
+
+    if (options.max && (typeof options.max !== 'number' || options.max < 0))
+      throw new TypeError('max must be a non-negative number')
+    // Kind of weird to have a default max of Infinity, but oh well.
+    const max = this[MAX] = options.max || Infinity
+
+    const lc = options.length || naiveLength
+    this[LENGTH_CALCULATOR] = (typeof lc !== 'function') ? naiveLength : lc
+    this[ALLOW_STALE] = options.stale || false
+    if (options.maxAge && typeof options.maxAge !== 'number')
+      throw new TypeError('maxAge must be a number')
+    this[MAX_AGE] = options.maxAge || 0
+    this[DISPOSE] = options.dispose
+    this[NO_DISPOSE_ON_SET] = options.noDisposeOnSet || false
+    this[UPDATE_AGE_ON_GET] = options.updateAgeOnGet || false
+    this.reset()
+  }
+
+  // resize the cache when the max changes.
+  set max (mL) {
+    if (typeof mL !== 'number' || mL < 0)
+      throw new TypeError('max must be a non-negative number')
+
+    this[MAX] = mL || Infinity
+    trim(this)
+  }
+  get max () {
+    return this[MAX]
+  }
+
+  set allowStale (allowStale) {
+    this[ALLOW_STALE] = !!allowStale
+  }
+  get allowStale () {
+    return this[ALLOW_STALE]
+  }
+
+  set maxAge (mA) {
+    if (typeof mA !== 'number')
+      throw new TypeError('maxAge must be a non-negative number')
+
+    this[MAX_AGE] = mA
+    trim(this)
+  }
+  get maxAge () {
+    return this[MAX_AGE]
+  }
+
+  // resize the cache when the lengthCalculator changes.
+  set lengthCalculator (lC) {
+    if (typeof lC !== 'function')
+      lC = naiveLength
+
+    if (lC !== this[LENGTH_CALCULATOR]) {
+      this[LENGTH_CALCULATOR] = lC
+      this[LENGTH] = 0
+      this[LRU_LIST].forEach(hit => {
+        hit.length = this[LENGTH_CALCULATOR](hit.value, hit.key)
+        this[LENGTH] += hit.length
+      })
+    }
+    trim(this)
+  }
+  get lengthCalculator () { return this[LENGTH_CALCULATOR] }
+
+  get length () { return this[LENGTH] }
+  get itemCount () { return this[LRU_LIST].length }
+
+  rforEach (fn, thisp) {
+    thisp = thisp || this
+    for (let walker = this[LRU_LIST].tail; walker !== null;) {
+      const prev = walker.prev
+      forEachStep(this, fn, walker, thisp)
+      walker = prev
+    }
+  }
+
+  forEach (fn, thisp) {
+    thisp = thisp || this
+    for (let walker = this[LRU_LIST].head; walker !== null;) {
+      const next = walker.next
+      forEachStep(this, fn, walker, thisp)
+      walker = next
+    }
+  }
+
+  keys () {
+    return this[LRU_LIST].toArray().map(k => k.key)
+  }
+
+  values () {
+    return this[LRU_LIST].toArray().map(k => k.value)
+  }
+
+  reset () {
+    if (this[DISPOSE] &&
+        this[LRU_LIST] &&
+        this[LRU_LIST].length) {
+      this[LRU_LIST].forEach(hit => this[DISPOSE](hit.key, hit.value))
+    }
+
+    this[CACHE] = new Map() // hash of items by key
+    this[LRU_LIST] = new Yallist() // list of items in order of use recency
+    this[LENGTH] = 0 // length of items in the list
+  }
+
+  dump () {
+    return this[LRU_LIST].map(hit =>
+      isStale(this, hit) ? false : {
+        k: hit.key,
+        v: hit.value,
+        e: hit.now + (hit.maxAge || 0)
+      }).toArray().filter(h => h)
+  }
+
+  dumpLru () {
+    return this[LRU_LIST]
+  }
+
+  set (key, value, maxAge) {
+    maxAge = maxAge || this[MAX_AGE]
+
+    if (maxAge && typeof maxAge !== 'number')
+      throw new TypeError('maxAge must be a number')
+
+    const now = maxAge ? Date.now() : 0
+    const len = this[LENGTH_CALCULATOR](value, key)
+
+    if (this[CACHE].has(key)) {
+      if (len > this[MAX]) {
+        del(this, this[CACHE].get(key))
+        return false
+      }
+
+      const node = this[CACHE].get(key)
+      const item = node.value
+
+      // dispose of the old one before overwriting
+      // split out into 2 ifs for better coverage tracking
+      if (this[DISPOSE]) {
+        if (!this[NO_DISPOSE_ON_SET])
+          this[DISPOSE](key, item.value)
+      }
+
+      item.now = now
+      item.maxAge = maxAge
+      item.value = value
+      this[LENGTH] += len - item.length
+      item.length = len
+      this.get(key)
+      trim(this)
+      return true
+    }
+
+    const hit = new Entry(key, value, len, now, maxAge)
+
+    // oversized objects fall out of cache automatically.
+    if (hit.length > this[MAX]) {
+      if (this[DISPOSE])
+        this[DISPOSE](key, value)
+
+      return false
+    }
+
+    this[LENGTH] += hit.length
+    this[LRU_LIST].unshift(hit)
+    this[CACHE].set(key, this[LRU_LIST].head)
+    trim(this)
+    return true
+  }
+
+  has (key) {
+    if (!this[CACHE].has(key)) return false
+    const hit = this[CACHE].get(key).value
+    return !isStale(this, hit)
+  }
+
+  get (key) {
+    return get(this, key, true)
+  }
+
+  peek (key) {
+    return get(this, key, false)
+  }
+
+  pop () {
+    const node = this[LRU_LIST].tail
+    if (!node)
+      return null
+
+    del(this, node)
+    return node.value
+  }
+
+  del (key) {
+    del(this, this[CACHE].get(key))
+  }
+
+  load (arr) {
+    // reset the cache
+    this.reset()
+
+    const now = Date.now()
+    // A previous serialized cache has the most recent items first
+    for (let l = arr.length - 1; l >= 0; l--) {
+      const hit = arr[l]
+      const expiresAt = hit.e || 0
+      if (expiresAt === 0)
+        // the item was created without expiration in a non aged cache
+        this.set(hit.k, hit.v)
+      else {
+        const maxAge = expiresAt - now
+        // dont add already expired items
+        if (maxAge > 0) {
+          this.set(hit.k, hit.v, maxAge)
+        }
+      }
+    }
+  }
+
+  prune () {
+    this[CACHE].forEach((value, key) => get(this, key, false))
+  }
+}
+
+const get = (self, key, doUse) => {
+  const node = self[CACHE].get(key)
+  if (node) {
+    const hit = node.value
+    if (isStale(self, hit)) {
+      del(self, node)
+      if (!self[ALLOW_STALE])
+        return undefined
+    } else {
+      if (doUse) {
+        if (self[UPDATE_AGE_ON_GET])
+          node.value.now = Date.now()
+        self[LRU_LIST].unshiftNode(node)
+      }
+    }
+    return hit.value
+  }
+}
+
+const isStale = (self, hit) => {
+  if (!hit || (!hit.maxAge && !self[MAX_AGE]))
+    return false
+
+  const diff = Date.now() - hit.now
+  return hit.maxAge ? diff > hit.maxAge
+    : self[MAX_AGE] && (diff > self[MAX_AGE])
+}
+
+const trim = self => {
+  if (self[LENGTH] > self[MAX]) {
+    for (let walker = self[LRU_LIST].tail;
+      self[LENGTH] > self[MAX] && walker !== null;) {
+      // We know that we're about to delete this one, and also
+      // what the next least recently used key will be, so just
+      // go ahead and set it now.
+      const prev = walker.prev
+      del(self, walker)
+      walker = prev
+    }
+  }
+}
+
+const del = (self, node) => {
+  if (node) {
+    const hit = node.value
+    if (self[DISPOSE])
+      self[DISPOSE](hit.key, hit.value)
+
+    self[LENGTH] -= hit.length
+    self[CACHE].delete(hit.key)
+    self[LRU_LIST].removeNode(node)
+  }
+}
+
+class Entry {
+  constructor (key, value, length, now, maxAge) {
+    this.key = key
+    this.value = value
+    this.length = length
+    this.now = now
+    this.maxAge = maxAge || 0
+  }
+}
+
+const forEachStep = (self, fn, node, thisp) => {
+  let hit = node.value
+  if (isStale(self, hit)) {
+    del(self, node)
+    if (!self[ALLOW_STALE])
+      hit = undefined
+  }
+  if (hit)
+    fn.call(thisp, hit.value, hit.key, self)
+}
+
+module.exports = LRUCache
+
 
 /***/ }),
 
@@ -2495,7 +2850,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const os = __importStar(__webpack_require__(87));
 const events = __importStar(__webpack_require__(614));
-const child = __importStar(__webpack_require__(129));
+const child = __importStar(__webpack_require__(4));
 const path = __importStar(__webpack_require__(622));
 const io = __importStar(__webpack_require__(436));
 const ioUtil = __importStar(__webpack_require__(962));
@@ -3102,6 +3457,7 @@ const minVersion = (range, loose) => {
   for (let i = 0; i < range.set.length; ++i) {
     const comparators = range.set[i]
 
+    let setMin = null
     comparators.forEach((comparator) => {
       // Clone to avoid manipulating the comparator's semver object.
       const compver = new SemVer(comparator.semver.version)
@@ -3116,8 +3472,8 @@ const minVersion = (range, loose) => {
           /* fallthrough */
         case '':
         case '>=':
-          if (!minver || gt(minver, compver)) {
-            minver = compver
+          if (!setMin || gt(compver, setMin)) {
+            setMin = compver
           }
           break
         case '<':
@@ -3129,6 +3485,8 @@ const minVersion = (range, loose) => {
           throw new Error(`Unexpected operation: ${comparator.operator}`)
       }
     })
+    if (setMin && (!minver || gt(minver, setMin)))
+      minver = setMin
   }
 
   if (minver && range.test(minver)) {
@@ -4224,9 +4582,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseVersion = exports.getVersion = exports.isAvailable = exports.hasGitAuthToken = exports.isLocalOrTarExporter = exports.getSecret = exports.getImageID = exports.getImageIDFile = void 0;
+const sync_1 = __importDefault(__webpack_require__(750));
 const fs_1 = __importDefault(__webpack_require__(747));
 const path_1 = __importDefault(__webpack_require__(622));
-const sync_1 = __importDefault(__webpack_require__(750));
 const semver = __importStar(__webpack_require__(383));
 const context = __importStar(__webpack_require__(842));
 const exec = __importStar(__webpack_require__(757));
@@ -4251,6 +4609,9 @@ function getSecret(kvp) {
         const delimiterIndex = kvp.indexOf('=');
         const key = kvp.substring(0, delimiterIndex);
         const value = kvp.substring(delimiterIndex + 1);
+        if (key.length == 0 || value.length == 0) {
+            throw new Error(`${kvp} is not a valid secret`);
+        }
         const secretFile = context.tmpNameSync({
             tmpdir: context.tmpDir()
         });
@@ -4264,7 +4625,7 @@ function isLocalOrTarExporter(outputs) {
         delimiter: ',',
         trim: true,
         columns: false,
-        relax_column_count: true
+        relaxColumnCount: true
     })) {
         // Local if no type is defined
         // https://github.com/docker/buildx/blob/d2bf42f8b4784d83fde17acb3ed84703ddc2156b/build/output.go#L29-L43
@@ -4655,7 +5016,7 @@ const outside = (version, range, hilo, options) => {
       throw new TypeError('Must provide a hilo val of "<" or ">"')
   }
 
-  // If it satisifes the range it is not outside
+  // If it satisfies the range it is not outside
   if (satisfies(version, range, options)) {
     return false
   }
@@ -4772,7 +5133,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const childProcess = __webpack_require__(129);
+const childProcess = __webpack_require__(4);
 const path = __webpack_require__(622);
 const util_1 = __webpack_require__(669);
 const ioUtil = __webpack_require__(962);
@@ -8423,12 +8784,7 @@ class Comparator {
     return ANY
   }
   constructor (comp, options) {
-    if (!options || typeof options !== 'object') {
-      options = {
-        loose: !!options,
-        includePrerelease: false
-      }
-    }
+    options = parseOptions(options)
 
     if (comp instanceof Comparator) {
       if (comp.loose === !!options.loose) {
@@ -8550,6 +8906,7 @@ class Comparator {
 
 module.exports = Comparator
 
+const parseOptions = __webpack_require__(785)
 const {re, t} = __webpack_require__(523)
 const cmp = __webpack_require__(98)
 const debug = __webpack_require__(427)
@@ -9117,6 +9474,440 @@ if (!exports.IsPost) {
     core.saveState('isPost', 'true');
 }
 //# sourceMappingURL=state-helper.js.map
+
+/***/ }),
+
+/***/ 665:
+/***/ (function(module, __unusedexports, __webpack_require__) {
+
+"use strict";
+
+module.exports = Yallist
+
+Yallist.Node = Node
+Yallist.create = Yallist
+
+function Yallist (list) {
+  var self = this
+  if (!(self instanceof Yallist)) {
+    self = new Yallist()
+  }
+
+  self.tail = null
+  self.head = null
+  self.length = 0
+
+  if (list && typeof list.forEach === 'function') {
+    list.forEach(function (item) {
+      self.push(item)
+    })
+  } else if (arguments.length > 0) {
+    for (var i = 0, l = arguments.length; i < l; i++) {
+      self.push(arguments[i])
+    }
+  }
+
+  return self
+}
+
+Yallist.prototype.removeNode = function (node) {
+  if (node.list !== this) {
+    throw new Error('removing node which does not belong to this list')
+  }
+
+  var next = node.next
+  var prev = node.prev
+
+  if (next) {
+    next.prev = prev
+  }
+
+  if (prev) {
+    prev.next = next
+  }
+
+  if (node === this.head) {
+    this.head = next
+  }
+  if (node === this.tail) {
+    this.tail = prev
+  }
+
+  node.list.length--
+  node.next = null
+  node.prev = null
+  node.list = null
+
+  return next
+}
+
+Yallist.prototype.unshiftNode = function (node) {
+  if (node === this.head) {
+    return
+  }
+
+  if (node.list) {
+    node.list.removeNode(node)
+  }
+
+  var head = this.head
+  node.list = this
+  node.next = head
+  if (head) {
+    head.prev = node
+  }
+
+  this.head = node
+  if (!this.tail) {
+    this.tail = node
+  }
+  this.length++
+}
+
+Yallist.prototype.pushNode = function (node) {
+  if (node === this.tail) {
+    return
+  }
+
+  if (node.list) {
+    node.list.removeNode(node)
+  }
+
+  var tail = this.tail
+  node.list = this
+  node.prev = tail
+  if (tail) {
+    tail.next = node
+  }
+
+  this.tail = node
+  if (!this.head) {
+    this.head = node
+  }
+  this.length++
+}
+
+Yallist.prototype.push = function () {
+  for (var i = 0, l = arguments.length; i < l; i++) {
+    push(this, arguments[i])
+  }
+  return this.length
+}
+
+Yallist.prototype.unshift = function () {
+  for (var i = 0, l = arguments.length; i < l; i++) {
+    unshift(this, arguments[i])
+  }
+  return this.length
+}
+
+Yallist.prototype.pop = function () {
+  if (!this.tail) {
+    return undefined
+  }
+
+  var res = this.tail.value
+  this.tail = this.tail.prev
+  if (this.tail) {
+    this.tail.next = null
+  } else {
+    this.head = null
+  }
+  this.length--
+  return res
+}
+
+Yallist.prototype.shift = function () {
+  if (!this.head) {
+    return undefined
+  }
+
+  var res = this.head.value
+  this.head = this.head.next
+  if (this.head) {
+    this.head.prev = null
+  } else {
+    this.tail = null
+  }
+  this.length--
+  return res
+}
+
+Yallist.prototype.forEach = function (fn, thisp) {
+  thisp = thisp || this
+  for (var walker = this.head, i = 0; walker !== null; i++) {
+    fn.call(thisp, walker.value, i, this)
+    walker = walker.next
+  }
+}
+
+Yallist.prototype.forEachReverse = function (fn, thisp) {
+  thisp = thisp || this
+  for (var walker = this.tail, i = this.length - 1; walker !== null; i--) {
+    fn.call(thisp, walker.value, i, this)
+    walker = walker.prev
+  }
+}
+
+Yallist.prototype.get = function (n) {
+  for (var i = 0, walker = this.head; walker !== null && i < n; i++) {
+    // abort out of the list early if we hit a cycle
+    walker = walker.next
+  }
+  if (i === n && walker !== null) {
+    return walker.value
+  }
+}
+
+Yallist.prototype.getReverse = function (n) {
+  for (var i = 0, walker = this.tail; walker !== null && i < n; i++) {
+    // abort out of the list early if we hit a cycle
+    walker = walker.prev
+  }
+  if (i === n && walker !== null) {
+    return walker.value
+  }
+}
+
+Yallist.prototype.map = function (fn, thisp) {
+  thisp = thisp || this
+  var res = new Yallist()
+  for (var walker = this.head; walker !== null;) {
+    res.push(fn.call(thisp, walker.value, this))
+    walker = walker.next
+  }
+  return res
+}
+
+Yallist.prototype.mapReverse = function (fn, thisp) {
+  thisp = thisp || this
+  var res = new Yallist()
+  for (var walker = this.tail; walker !== null;) {
+    res.push(fn.call(thisp, walker.value, this))
+    walker = walker.prev
+  }
+  return res
+}
+
+Yallist.prototype.reduce = function (fn, initial) {
+  var acc
+  var walker = this.head
+  if (arguments.length > 1) {
+    acc = initial
+  } else if (this.head) {
+    walker = this.head.next
+    acc = this.head.value
+  } else {
+    throw new TypeError('Reduce of empty list with no initial value')
+  }
+
+  for (var i = 0; walker !== null; i++) {
+    acc = fn(acc, walker.value, i)
+    walker = walker.next
+  }
+
+  return acc
+}
+
+Yallist.prototype.reduceReverse = function (fn, initial) {
+  var acc
+  var walker = this.tail
+  if (arguments.length > 1) {
+    acc = initial
+  } else if (this.tail) {
+    walker = this.tail.prev
+    acc = this.tail.value
+  } else {
+    throw new TypeError('Reduce of empty list with no initial value')
+  }
+
+  for (var i = this.length - 1; walker !== null; i--) {
+    acc = fn(acc, walker.value, i)
+    walker = walker.prev
+  }
+
+  return acc
+}
+
+Yallist.prototype.toArray = function () {
+  var arr = new Array(this.length)
+  for (var i = 0, walker = this.head; walker !== null; i++) {
+    arr[i] = walker.value
+    walker = walker.next
+  }
+  return arr
+}
+
+Yallist.prototype.toArrayReverse = function () {
+  var arr = new Array(this.length)
+  for (var i = 0, walker = this.tail; walker !== null; i++) {
+    arr[i] = walker.value
+    walker = walker.prev
+  }
+  return arr
+}
+
+Yallist.prototype.slice = function (from, to) {
+  to = to || this.length
+  if (to < 0) {
+    to += this.length
+  }
+  from = from || 0
+  if (from < 0) {
+    from += this.length
+  }
+  var ret = new Yallist()
+  if (to < from || to < 0) {
+    return ret
+  }
+  if (from < 0) {
+    from = 0
+  }
+  if (to > this.length) {
+    to = this.length
+  }
+  for (var i = 0, walker = this.head; walker !== null && i < from; i++) {
+    walker = walker.next
+  }
+  for (; walker !== null && i < to; i++, walker = walker.next) {
+    ret.push(walker.value)
+  }
+  return ret
+}
+
+Yallist.prototype.sliceReverse = function (from, to) {
+  to = to || this.length
+  if (to < 0) {
+    to += this.length
+  }
+  from = from || 0
+  if (from < 0) {
+    from += this.length
+  }
+  var ret = new Yallist()
+  if (to < from || to < 0) {
+    return ret
+  }
+  if (from < 0) {
+    from = 0
+  }
+  if (to > this.length) {
+    to = this.length
+  }
+  for (var i = this.length, walker = this.tail; walker !== null && i > to; i--) {
+    walker = walker.prev
+  }
+  for (; walker !== null && i > from; i--, walker = walker.prev) {
+    ret.push(walker.value)
+  }
+  return ret
+}
+
+Yallist.prototype.splice = function (start, deleteCount, ...nodes) {
+  if (start > this.length) {
+    start = this.length - 1
+  }
+  if (start < 0) {
+    start = this.length + start;
+  }
+
+  for (var i = 0, walker = this.head; walker !== null && i < start; i++) {
+    walker = walker.next
+  }
+
+  var ret = []
+  for (var i = 0; walker && i < deleteCount; i++) {
+    ret.push(walker.value)
+    walker = this.removeNode(walker)
+  }
+  if (walker === null) {
+    walker = this.tail
+  }
+
+  if (walker !== this.head && walker !== this.tail) {
+    walker = walker.prev
+  }
+
+  for (var i = 0; i < nodes.length; i++) {
+    walker = insert(this, walker, nodes[i])
+  }
+  return ret;
+}
+
+Yallist.prototype.reverse = function () {
+  var head = this.head
+  var tail = this.tail
+  for (var walker = head; walker !== null; walker = walker.prev) {
+    var p = walker.prev
+    walker.prev = walker.next
+    walker.next = p
+  }
+  this.head = tail
+  this.tail = head
+  return this
+}
+
+function insert (self, node, value) {
+  var inserted = node === self.head ?
+    new Node(value, null, node, self) :
+    new Node(value, node, node.next, self)
+
+  if (inserted.next === null) {
+    self.tail = inserted
+  }
+  if (inserted.prev === null) {
+    self.head = inserted
+  }
+
+  self.length++
+
+  return inserted
+}
+
+function push (self, item) {
+  self.tail = new Node(item, self.tail, null, self)
+  if (!self.head) {
+    self.head = self.tail
+  }
+  self.length++
+}
+
+function unshift (self, item) {
+  self.head = new Node(item, null, self.head, self)
+  if (!self.tail) {
+    self.tail = self.head
+  }
+  self.length++
+}
+
+function Node (value, prev, next, list) {
+  if (!(this instanceof Node)) {
+    return new Node(value, prev, next, list)
+  }
+
+  this.list = list
+  this.value = value
+
+  if (prev) {
+    prev.next = this
+    this.prev = prev
+  } else {
+    this.prev = null
+  }
+
+  if (next) {
+    next.prev = this
+    this.next = next
+  } else {
+    this.next = null
+  }
+}
+
+try {
+  // add if support for Symbol.iterator is present
+  __webpack_require__(91)(Yallist)
+} catch (er) {}
+
 
 /***/ }),
 
@@ -10287,6 +11078,24 @@ exports.Octokit = Octokit;
 
 /***/ }),
 
+/***/ 785:
+/***/ (function(module) {
+
+// parse out just the options we care about so we always get a consistent
+// obj with keys in a consistent order.
+const opts = ['includePrerelease', 'loose', 'rtl']
+const parseOptions = options =>
+  !options ? {}
+  : typeof options !== 'object' ? { loose: true }
+  : opts.filter(k => options[k]).reduce((options, k) => {
+    options[k] = true
+    return options
+  }, {})
+module.exports = parseOptions
+
+
+/***/ }),
+
 /***/ 804:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -10334,12 +11143,7 @@ function removeHook (state, name, method) {
 // hoisted class for cyclic dependency
 class Range {
   constructor (range, options) {
-    if (!options || typeof options !== 'object') {
-      options = {
-        loose: !!options,
-        includePrerelease: false
-      }
-    }
+    options = parseOptions(options)
 
     if (range instanceof Range) {
       if (
@@ -10379,6 +11183,24 @@ class Range {
       throw new TypeError(`Invalid SemVer Range: ${range}`)
     }
 
+    // if we have any that are not the null set, throw out null sets.
+    if (this.set.length > 1) {
+      // keep the first one, in case they're all null sets
+      const first = this.set[0]
+      this.set = this.set.filter(c => !isNullSet(c[0]))
+      if (this.set.length === 0)
+        this.set = [first]
+      else if (this.set.length > 1) {
+        // if we have any that are *, then the range is just *
+        for (const c of this.set) {
+          if (c.length === 1 && isAny(c[0])) {
+            this.set = [c]
+            break
+          }
+        }
+      }
+    }
+
     this.format()
   }
 
@@ -10397,8 +11219,17 @@ class Range {
   }
 
   parseRange (range) {
-    const loose = this.options.loose
     range = range.trim()
+
+    // memoize range parsing for performance.
+    // this is a very hot path, and fully deterministic.
+    const memoOpts = Object.keys(this.options).join(',')
+    const memoKey = `parseRange:${memoOpts}:${range}`
+    const cached = cache.get(memoKey)
+    if (cached)
+      return cached
+
+    const loose = this.options.loose
     // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
     const hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE]
     range = range.replace(hr, hyphenReplace(this.options.includePrerelease))
@@ -10420,15 +11251,33 @@ class Range {
     // ready to be split into comparators.
 
     const compRe = loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
-    return range
+    const rangeList = range
       .split(' ')
       .map(comp => parseComparator(comp, this.options))
       .join(' ')
       .split(/\s+/)
+      // >=0.0.0 is equivalent to *
       .map(comp => replaceGTE0(comp, this.options))
       // in loose mode, throw out any that are not valid comparators
       .filter(this.options.loose ? comp => !!comp.match(compRe) : () => true)
       .map(comp => new Comparator(comp, this.options))
+
+    // if any comparators are the null set, then replace with JUST null set
+    // if more than one comparator, remove any * comparators
+    // also, don't include the same comparator more than once
+    const l = rangeList.length
+    const rangeMap = new Map()
+    for (const comp of rangeList) {
+      if (isNullSet(comp))
+        return [comp]
+      rangeMap.set(comp.value, comp)
+    }
+    if (rangeMap.size > 1 && rangeMap.has(''))
+      rangeMap.delete('')
+
+    const result = [...rangeMap.values()]
+    cache.set(memoKey, result)
+    return result
   }
 
   intersects (range, options) {
@@ -10477,6 +11326,10 @@ class Range {
 }
 module.exports = Range
 
+const LRU = __webpack_require__(129)
+const cache = new LRU({ max: 1000 })
+
+const parseOptions = __webpack_require__(785)
 const Comparator = __webpack_require__(532)
 const debug = __webpack_require__(427)
 const SemVer = __webpack_require__(88)
@@ -10487,6 +11340,9 @@ const {
   tildeTrimReplace,
   caretTrimReplace
 } = __webpack_require__(523)
+
+const isNullSet = c => c.value === '<0.0.0-0'
+const isAny = c => c.value === ''
 
 // take a set of comparators and determine whether there
 // exists a version which can satisfy it
@@ -10817,15 +11673,43 @@ const nl = 10
 const np = 12
 const cr = 13
 const space = 32
-const bom_utf8 = Buffer.from([239, 187, 191])
+const boms = {
+  // Note, the following are equals:
+  // Buffer.from("\ufeff")
+  // Buffer.from([239, 187, 191])
+  // Buffer.from('EFBBBF', 'hex')
+  'utf8': Buffer.from([239, 187, 191]),
+  // Note, the following are equals:
+  // Buffer.from "\ufeff", 'utf16le
+  // Buffer.from([255, 254])
+  'utf16le': Buffer.from([255, 254])
+}
 
 class Parser extends Transform {
   constructor(opts = {}){
-    super({...{readableObjectMode: true}, ...opts})
+    super({...{readableObjectMode: true}, ...opts, encoding: null})
+    this.__originalOptions = opts
+    this.__normalizeOptions(opts)
+  }
+  __normalizeOptions(opts){
     const options = {}
     // Merge with user options
     for(let opt in opts){
       options[underscore(opt)] = opts[opt]
+    }
+    // Normalize option `encoding`
+    // Note: defined first because other options depends on it
+    // to convert chars/strings into buffers.
+    if(options.encoding === undefined || options.encoding === true){
+      options.encoding = 'utf8'
+    }else if(options.encoding === null || options.encoding === false){
+      options.encoding = null
+    }else if(typeof options.encoding !== 'string' && options.encoding !== null){
+      throw new CsvError('CSV_INVALID_OPTION_ENCODING', [
+        'Invalid option encoding:',
+        'encoding must be a string or null to return a buffer,',
+        `got ${JSON.stringify(options.encoding)}`
+      ], options)
     }
     // Normalize option `bom`
     if(options.bom === undefined || options.bom === null || options.bom === false){
@@ -10834,7 +11718,7 @@ class Parser extends Transform {
       throw new CsvError('CSV_INVALID_OPTION_BOM', [
         'Invalid option bom:', 'bom must be true,',
         `got ${JSON.stringify(options.bom)}`
-      ])
+      ], options)
     }
     // Normalize option `cast`
     let fnCastField = null
@@ -10847,7 +11731,7 @@ class Parser extends Transform {
       throw new CsvError('CSV_INVALID_OPTION_CAST', [
         'Invalid option cast:', 'cast must be true or a function,',
         `got ${JSON.stringify(options.cast)}`
-      ])
+      ], options)
     }
     // Normalize option `cast_date`
     if(options.cast_date === undefined || options.cast_date === null || options.cast_date === false || options.cast_date === ''){
@@ -10861,7 +11745,7 @@ class Parser extends Transform {
       throw new CsvError('CSV_INVALID_OPTION_CAST_DATE', [
         'Invalid option cast_date:', 'cast_date must be true or a function,',
         `got ${JSON.stringify(options.cast_date)}`
-      ])
+      ], options)
     }
     // Normalize option `columns`
     let fnFirstLineToHeaders = null
@@ -10880,7 +11764,7 @@ class Parser extends Transform {
         'Invalid option columns:',
         'expect an object, a function or true,',
         `got ${JSON.stringify(options.columns)}`
-      ])
+      ], options)
     }
     // Normalize option `columns_duplicates_to_array`
     if(options.columns_duplicates_to_array === undefined || options.columns_duplicates_to_array === null || options.columns_duplicates_to_array === false){
@@ -10890,21 +11774,21 @@ class Parser extends Transform {
         'Invalid option columns_duplicates_to_array:',
         'expect an boolean,',
         `got ${JSON.stringify(options.columns_duplicates_to_array)}`
-      ])
+      ], options)
     }
     // Normalize option `comment`
     if(options.comment === undefined || options.comment === null || options.comment === false || options.comment === ''){
       options.comment = null
     }else{
       if(typeof options.comment === 'string'){
-        options.comment = Buffer.from(options.comment)
+        options.comment = Buffer.from(options.comment, options.encoding)
       }
       if(!Buffer.isBuffer(options.comment)){
         throw new CsvError('CSV_INVALID_OPTION_COMMENT', [
           'Invalid option comment:',
           'comment must be a buffer or a string,',
           `got ${JSON.stringify(options.comment)}`
-        ])
+        ], options)
       }
     }
     // Normalize option `delimiter`
@@ -10915,39 +11799,35 @@ class Parser extends Transform {
         'Invalid option delimiter:',
         'delimiter must be a non empty string or buffer or array of string|buffer,',
         `got ${delimiter_json}`
-      ])
+      ], options)
     }
     options.delimiter = options.delimiter.map(function(delimiter){
       if(delimiter === undefined || delimiter === null || delimiter === false){
-        return Buffer.from(',')
+        return Buffer.from(',', options.encoding)
       }
       if(typeof delimiter === 'string'){
-        delimiter = Buffer.from(delimiter)
+        delimiter = Buffer.from(delimiter, options.encoding)
       }
       if( !Buffer.isBuffer(delimiter) || delimiter.length === 0){
         throw new CsvError('CSV_INVALID_OPTION_DELIMITER', [
           'Invalid option delimiter:',
           'delimiter must be a non empty string or buffer or array of string|buffer,',
           `got ${delimiter_json}`
-        ])
+        ], options)
       }
       return delimiter
     })
     // Normalize option `escape`
     if(options.escape === undefined || options.escape === true){
-      options.escape = Buffer.from('"')
+      options.escape = Buffer.from('"', options.encoding)
     }else if(typeof options.escape === 'string'){
-      options.escape = Buffer.from(options.escape)
+      options.escape = Buffer.from(options.escape, options.encoding)
     }else if (options.escape === null || options.escape === false){
       options.escape = null
     }
     if(options.escape !== null){
       if(!Buffer.isBuffer(options.escape)){
         throw new Error(`Invalid Option: escape must be a buffer, a string or a boolean, got ${JSON.stringify(options.escape)}`)
-      }else if(options.escape.length !== 1){
-        throw new Error(`Invalid Option Length: escape must be one character, got ${options.escape.length}`)
-      }else{
-        options.escape = options.escape[0]
       }
     }
     // Normalize option `from`
@@ -11003,7 +11883,11 @@ class Parser extends Transform {
       if(options.objname.length === 0){
         throw new Error(`Invalid Option: objname must be a non empty buffer`)
       }
-      options.objname = options.objname.toString()
+      if(options.encoding === null){
+        // Don't call `toString`, leave objname as a buffer
+      }else{
+        options.objname = options.objname.toString(options.encoding)
+      }
     }else if(typeof options.objname === 'string'){
       if(options.objname.length === 0){
         throw new Error(`Invalid Option: objname must be a non empty string`)
@@ -11020,23 +11904,19 @@ class Parser extends Transform {
         'Invalid option `on_record`:',
         'expect a function,',
         `got ${JSON.stringify(options.on_record)}`
-      ])
+      ], options)
     }
     // Normalize option `quote`
     if(options.quote === null || options.quote === false || options.quote === ''){
       options.quote = null
     }else{
       if(options.quote === undefined || options.quote === true){
-        options.quote = Buffer.from('"')
+        options.quote = Buffer.from('"', options.encoding)
       }else if(typeof options.quote === 'string'){
-        options.quote = Buffer.from(options.quote)
+        options.quote = Buffer.from(options.quote, options.encoding)
       }
       if(!Buffer.isBuffer(options.quote)){
         throw new Error(`Invalid Option: quote must be a buffer or a string, got ${JSON.stringify(options.quote)}`)
-      }else if(options.quote.length !== 1){
-        throw new Error(`Invalid Option Length: quote must be one character, got ${options.quote.length}`)
-      }else{
-        options.quote = options.quote[0]
       }
     }
     // Normalize option `raw`
@@ -11053,7 +11933,7 @@ class Parser extends Transform {
     }
     options.record_delimiter = options.record_delimiter.map( function(rd){
       if(typeof rd === 'string'){
-        rd = Buffer.from(rd)
+        rd = Buffer.from(rd, options.encoding)
       }
       return rd
     })
@@ -11182,13 +12062,24 @@ class Parser extends Transform {
       bomSkipped: false,
       castField: fnCastField,
       commenting: false,
+      // Current error encountered by a record
+      error: undefined,
       enabled: options.from_line === 1,
       escaping: false,
-      escapeIsQuote: options.escape === options.quote,
+      // escapeIsQuote: options.escape === options.quote,
+      escapeIsQuote: Buffer.isBuffer(options.escape) && Buffer.isBuffer(options.quote) && Buffer.compare(options.escape, options.quote) === 0,
       expectedRecordLength: options.columns === null ? 0 : options.columns.length,
       field: new ResizeableBuffer(20),
       firstLineToHeaders: fnFirstLineToHeaders,
       info: Object.assign({}, this.info),
+      needMoreDataSize: Math.max(
+        // Skip if the remaining buffer smaller than comment
+        options.comment !== null ? options.comment.length : 0,
+        // Skip if the remaining buffer can be delimiter
+        ...options.delimiter.map( (delimiter) => delimiter.length),
+        // Skip if the remaining buffer can be escape sequence
+        options.quote !== null ? options.quote.length : 0,
+      ),
       previousBuf: undefined,
       quoting: false,
       stop: false,
@@ -11197,7 +12088,7 @@ class Parser extends Transform {
       recordHasError: false,
       record_length: 0,
       recordDelimiterMaxLength: options.record_delimiter.length === 0 ? 2 : Math.max(...options.record_delimiter.map( (v) => v.length)),
-      trimChars: [Buffer.from(' ')[0], Buffer.from('\t')[0]],
+      trimChars: [Buffer.from(' ', options.encoding)[0], Buffer.from('\t', options.encoding)[0]],
       wasQuoting: false,
       wasRowDelimiter: false
     }
@@ -11251,11 +12142,15 @@ class Parser extends Transform {
           this.state.previousBuf = buf
           return
         }
-        // skip BOM detect because data length < 3
       }else{
-        if(bom_utf8.compare(buf, 0, 3) === 0){
-          // Skip BOM
-          buf = buf.slice(3)
+        for(let encoding in boms){
+          if(boms[encoding].compare(buf, 0, boms[encoding].length) === 0){
+            // Skip BOM
+            buf = buf.slice(boms[encoding].length)
+            // Renormalize original options with the new encoding
+            this.__normalizeOptions({...this.__originalOptions, encoding: encoding})
+            break
+          }
         }
         this.state.bomSkipped = true
       }
@@ -11301,35 +12196,37 @@ class Parser extends Transform {
       }else{
         // Escape is only active inside quoted fields
         // We are quoting, the char is an escape chr and there is a chr to escape
-        if(escape !== null && this.state.quoting === true && chr === escape && pos + 1 < bufLen){
+        // if(escape !== null && this.state.quoting === true && chr === escape && pos + 1 < bufLen){
+        if(escape !== null && this.state.quoting === true && this.__isEscape(buf, pos, chr) && pos + escape.length < bufLen){
           if(escapeIsQuote){
-            if(buf[pos+1] === quote){
+            if(this.__isQuote(buf, pos+escape.length)){
               this.state.escaping = true
+              pos += escape.length - 1
               continue
             }
           }else{
             this.state.escaping = true
+            pos += escape.length - 1
             continue
           }
         }
         // Not currently escaping and chr is a quote
         // TODO: need to compare bytes instead of single char
-        if(this.state.commenting === false && chr === quote){
+        if(this.state.commenting === false && this.__isQuote(buf, pos)){
           if(this.state.quoting === true){
-            const nextChr = buf[pos+1]
+            const nextChr = buf[pos+quote.length]
             const isNextChrTrimable = rtrim && this.__isCharTrimable(nextChr)
-            // const isNextChrComment = nextChr === comment
-            const isNextChrComment = comment !== null && this.__compareBytes(comment, buf, pos+1, nextChr)
-            const isNextChrDelimiter = this.__isDelimiter(nextChr, buf, pos+1)
-            const isNextChrRowDelimiter = record_delimiter.length === 0 ? this.__autoDiscoverRowDelimiter(buf, pos+1) : this.__isRecordDelimiter(nextChr, buf, pos+1)
+            const isNextChrComment = comment !== null && this.__compareBytes(comment, buf, pos+quote.length, nextChr)
+            const isNextChrDelimiter = this.__isDelimiter(buf, pos+quote.length, nextChr)
+            const isNextChrRowDelimiter = record_delimiter.length === 0 ? this.__autoDiscoverRowDelimiter(buf, pos+quote.length) : this.__isRecordDelimiter(nextChr, buf, pos+quote.length)
             // Escape a quote
             // Treat next char as a regular character
-            // TODO: need to compare bytes instead of single char
-            if(escape !== null && chr === escape && nextChr === quote){
-              pos++
+            if(escape !== null && this.__isEscape(buf, pos, chr) && this.__isQuote(buf, pos + escape.length)){
+              pos += escape.length - 1
             }else if(!nextChr || isNextChrDelimiter || isNextChrRowDelimiter || isNextChrComment || isNextChrTrimable){
               this.state.quoting = false
               this.state.wasQuoting = true
+              pos += quote.length - 1
               continue
             }else if(relax === false){
               const err = this.__error(
@@ -11339,14 +12236,14 @@ class Parser extends Transform {
                   `at line ${this.info.lines}`,
                   'instead of delimiter, row delimiter, trimable character',
                   '(if activated) or comment',
-                ], this.__context())
+                ], this.options, this.__context())
               )
               if(err !== undefined) return err
             }else{
               this.state.quoting = false
               this.state.wasQuoting = true
-              // continue
               this.state.field.prepend(quote)
+              pos += quote.length - 1
             }
           }else{
             if(this.state.field.length !== 0){
@@ -11356,7 +12253,7 @@ class Parser extends Transform {
                   new CsvError('INVALID_OPENING_QUOTE', [
                     'Invalid Opening Quote:',
                     `a quote is found inside a field at line ${this.info.lines}`,
-                  ], this.__context(), {
+                  ], this.options, this.__context(), {
                     field: this.state.field,
                   })
                 )
@@ -11364,6 +12261,7 @@ class Parser extends Transform {
               }
             }else{
               this.state.quoting = true
+              pos += quote.length - 1
               continue
             }
           }
@@ -11414,7 +12312,7 @@ class Parser extends Transform {
             this.state.commenting = true
             continue
           }
-          let delimiterLength = this.__isDelimiter(chr, buf, pos)
+          let delimiterLength = this.__isDelimiter(buf, pos, chr)
           if(delimiterLength !== 0){
             const errField = this.__onField()
             if(errField !== undefined) return errField
@@ -11431,7 +12329,7 @@ class Parser extends Transform {
               'record exceed the maximum number of tolerated bytes',
               `of ${max_record_size}`,
               `at line ${this.info.lines}`,
-            ], this.__context())
+            ], this.options, this.__context())
           )
           if(err !== undefined) return err
         }
@@ -11448,7 +12346,7 @@ class Parser extends Transform {
             'Invalid Closing Quote:',
             'found non trimable byte after quote',
             `at line ${this.info.lines}`,
-          ], this.__context())
+          ], this.options, this.__context())
         )
         if(err !== undefined) return err
       }
@@ -11460,7 +12358,7 @@ class Parser extends Transform {
           new CsvError('CSV_QUOTE_NOT_CLOSED', [
             'Quote Not Closed:',
             `the parsing is finished with an opening quote at line ${this.info.lines}`,
-          ], this.__context())
+          ], this.options, this.__context())
         )
         if(err !== undefined) return err
       }else{
@@ -11489,7 +12387,7 @@ class Parser extends Transform {
     return chr === space || chr === tab || chr === cr || chr === nl || chr === np
   }
   __onRow(){
-    const {columns, columns_duplicates_to_array, info, from, relax_column_count, relax_column_count_less, relax_column_count_more, raw, skip_lines_with_empty_values} = this.options
+    const {columns, columns_duplicates_to_array, encoding, info, from, relax_column_count, relax_column_count_less, relax_column_count_more, raw, skip_lines_with_empty_values} = this.options
     const {enabled, record} = this.state
     if(enabled === false){
       return this.__resetRow()
@@ -11507,35 +12405,38 @@ class Parser extends Transform {
       this.state.expectedRecordLength = recordLength
     }
     if(recordLength !== this.state.expectedRecordLength){
+      const err = columns === false ?
+        this.__error(
+          // Todo: rename CSV_INCONSISTENT_RECORD_LENGTH to
+          // CSV_RECORD_INCONSISTENT_FIELDS_LENGTH
+          new CsvError('CSV_INCONSISTENT_RECORD_LENGTH', [
+            'Invalid Record Length:',
+            `expect ${this.state.expectedRecordLength},`,
+            `got ${recordLength} on line ${this.info.lines}`,
+          ], this.options, this.__context(), {
+            record: record,
+          })
+        )
+      :
+        this.__error(
+          // Todo: rename CSV_RECORD_DONT_MATCH_COLUMNS_LENGTH to
+          // CSV_RECORD_INCONSISTENT_COLUMNS
+          new CsvError('CSV_RECORD_DONT_MATCH_COLUMNS_LENGTH', [
+            'Invalid Record Length:',
+            `columns length is ${columns.length},`, // rename columns
+            `got ${recordLength} on line ${this.info.lines}`,
+          ], this.options, this.__context(), {
+            record: record,
+          })
+        )
       if(relax_column_count === true || 
         (relax_column_count_less === true && recordLength < this.state.expectedRecordLength) ||
         (relax_column_count_more === true && recordLength > this.state.expectedRecordLength) ){
         this.info.invalid_field_length++
-      }else{
-        if(columns === false){
-          const err = this.__error(
-            new CsvError('CSV_INCONSISTENT_RECORD_LENGTH', [
-              'Invalid Record Length:',
-              `expect ${this.state.expectedRecordLength},`,
-              `got ${recordLength} on line ${this.info.lines}`,
-            ], this.__context(), {
-              record: record,
-            })
-          )
-          if(err !== undefined) return err
-        }else{
-          const err = this.__error(
-            // CSV_INVALID_RECORD_LENGTH_DONT_MATCH_COLUMNS
-            new CsvError('CSV_RECORD_DONT_MATCH_COLUMNS_LENGTH', [
-              'Invalid Record Length:',
-              `columns length is ${columns.length},`, // rename columns
-              `got ${recordLength} on line ${this.info.lines}`,
-            ], this.__context(), {
-              record: record,
-            })
-          )
-          if(err !== undefined) return err
-        }
+        this.state.error = err
+      // Error is undefined with skip_lines_with_error
+      }else if(err !== undefined){
+        return err
       }
     }
     if(skip_lines_with_empty_values === true){
@@ -11556,7 +12457,6 @@ class Parser extends Transform {
         // Transform record array to an object
         for(let i = 0, l = record.length; i < l; i++){
           if(columns[i] === undefined || columns[i].disabled) continue
-          // obj[columns[i].name] = record[i]
           // Turn duplicate columns into an array
           if (columns_duplicates_to_array === true && obj[columns[i].name]) {
             if (Array.isArray(obj[columns[i].name])) {
@@ -11573,7 +12473,7 @@ class Parser extends Transform {
           if(raw === true || info === true){
             const err = this.__push(Object.assign(
               {record: obj},
-              (raw === true ? {raw: this.state.rawBuffer.toString()}: {}),
+              (raw === true ? {raw: this.state.rawBuffer.toString(encoding)}: {}),
               (info === true ? {info: this.state.info}: {})
             ))
             if(err){
@@ -11589,7 +12489,7 @@ class Parser extends Transform {
           if(raw === true || info === true){
             const err = this.__push(Object.assign(
               {record: [obj[objname], obj]},
-              raw === true ? {raw: this.state.rawBuffer.toString()}: {},
+              raw === true ? {raw: this.state.rawBuffer.toString(encoding)}: {},
               info === true ? {info: this.state.info}: {}
             ))
             if(err){
@@ -11606,7 +12506,7 @@ class Parser extends Transform {
         if(raw === true || info === true){
           const err = this.__push(Object.assign(
             {record: record},
-            raw === true ? {raw: this.state.rawBuffer.toString()}: {},
+            raw === true ? {raw: this.state.rawBuffer.toString(encoding)}: {},
             info === true ? {info: this.state.info}: {}
           ))
           if(err){
@@ -11632,7 +12532,7 @@ class Parser extends Transform {
             'Invalid Column Mapping:',
             'expect an array from column function,',
             `got ${JSON.stringify(headers)}`
-          ], this.__context(), {
+          ], this.options, this.__context(), {
             headers: headers,
           })
         )
@@ -11650,17 +12550,18 @@ class Parser extends Transform {
     if(this.options.raw === true){
       this.state.rawBuffer.reset()
     }
+    this.state.error = undefined
     this.state.record = []
     this.state.record_length = 0
   }
   __onField(){
-    const {cast, rtrim, max_record_size} = this.options
+    const {cast, encoding, rtrim, max_record_size} = this.options
     const {enabled, wasQuoting} = this.state
     // Short circuit for the from_line options
     if(enabled === false){ /* this.options.columns !== true && */
       return this.__resetField()
     }
-    let field = this.state.field.toString()
+    let field = this.state.field.toString(encoding)
     if(rtrim === true && wasQuoting === false){
       field = field.trimRight()
     }
@@ -11727,38 +12628,30 @@ class Parser extends Transform {
   __isFloat(value){
     return (value - parseFloat( value ) + 1) >= 0 // Borrowed from jquery
   }
-  __compareBytes(sourceBuf, targetBuf, pos, firtByte){
-    if(sourceBuf[0] !== firtByte) return 0
+  __compareBytes(sourceBuf, targetBuf, targetPos, firstByte){
+    if(sourceBuf[0] !== firstByte) return 0
     const sourceLength = sourceBuf.length
     for(let i = 1; i < sourceLength; i++){
-      if(sourceBuf[i] !== targetBuf[pos+i]) return 0
+      if(sourceBuf[i] !== targetBuf[targetPos+i]) return 0
     }
     return sourceLength
   }
   __needMoreData(i, bufLen, end){
-    if(end){
-      return false
-    }
-    const {comment, delimiter} = this.options
-    const {quoting, recordDelimiterMaxLength} = this.state
+    if(end) return false
+    const {quote} = this.options
+    const {quoting, needMoreDataSize, recordDelimiterMaxLength} = this.state
     const numOfCharLeft = bufLen - i - 1
     const requiredLength = Math.max(
-      // Skip if the remaining buffer smaller than comment
-      comment ? comment.length : 0,
-      // Skip if the remaining buffer smaller than row delimiter
+      needMoreDataSize,
+      // Skip if the remaining buffer smaller than record delimiter
       recordDelimiterMaxLength,
       // Skip if the remaining buffer can be row delimiter following the closing quote
       // 1 is for quote.length
-      quoting ? (1 + recordDelimiterMaxLength) : 0,
-      // Skip if the remaining buffer can be delimiter
-      delimiter.length,
-      // Skip if the remaining buffer can be escape sequence
-      // 1 is for escape.length
-      1
+      quoting ? (quote.length + recordDelimiterMaxLength) : 0,
     )
     return numOfCharLeft < requiredLength
   }
-  __isDelimiter(chr, buf, pos){
+  __isDelimiter(buf, pos, chr){
     const {delimiter} = this.options
     loop1: for(let i = 0; i < delimiter.length; i++){
       const del = delimiter[i]
@@ -11789,20 +12682,46 @@ class Parser extends Transform {
     }
     return 0
   }
+  __isEscape(buf, pos, chr){
+    const {escape} = this.options
+    if(escape === null) return false
+    const l = escape.length
+    if(escape[0] === chr){
+      for(let i = 0; i < l; i++){
+        if(escape[i] !== buf[pos+i]){
+          return false
+        }
+      }
+      return true
+    }
+    return false
+  }
+  __isQuote(buf, pos){
+    const {quote} = this.options
+    if(quote === null) return false
+    const l = quote.length
+    for(let i = 0; i < l; i++){
+      if(quote[i] !== buf[pos+i]){
+        return false
+      }
+    }
+    return true
+  }
   __autoDiscoverRowDelimiter(buf, pos){
+    const {encoding} = this.options
     const chr = buf[pos]
     if(chr === cr){
       if(buf[pos+1] === nl){
-        this.options.record_delimiter.push(Buffer.from('\r\n'))
+        this.options.record_delimiter.push(Buffer.from('\r\n', encoding))
         this.state.recordDelimiterMaxLength = 2
         return 2
       }else{
-        this.options.record_delimiter.push(Buffer.from('\r'))
+        this.options.record_delimiter.push(Buffer.from('\r', encoding))
         this.state.recordDelimiterMaxLength = 1
         return 1
       }
     }else if(chr === nl){
-      this.options.record_delimiter.push(Buffer.from('\n'))
+      this.options.record_delimiter.push(Buffer.from('\n', encoding))
       this.state.recordDelimiterMaxLength = 1
       return 1
     }
@@ -11830,6 +12749,7 @@ class Parser extends Transform {
         ) :
         this.state.record.length,
       empty_lines: this.info.empty_lines,
+      error: this.state.error,
       header: columns === true,
       index: this.state.record.length,
       invalid_field_length: this.info.invalid_field_length,
@@ -11855,7 +12775,7 @@ const parse = function(){
       throw new CsvError('CSV_INVALID_ARGUMENT', [
         'Invalid argument:',
         `got ${JSON.stringify(argument)} at index ${i}`
-      ])
+      ], this.options)
     }
   }
   const parser = new Parser(options)
@@ -11894,7 +12814,7 @@ const parse = function(){
 }
 
 class CsvError extends Error {
-  constructor(code, message, ...contexts) {
+  constructor(code, message, options, ...contexts) {
     if(Array.isArray(message)) message = message.join(' ')
     super(message)
     if(Error.captureStackTrace !== undefined){
@@ -11904,7 +12824,7 @@ class CsvError extends Error {
     for(const context of contexts){
       for(const key in context){
         const value = context[key]
-        this[key] = Buffer.isBuffer(value) ? value.toString() : value == null ? value : JSON.parse(JSON.stringify(value))
+        this[key] = Buffer.isBuffer(value) ? value.toString(options.encoding) : value == null ? value : JSON.parse(JSON.stringify(value))
       }
     }
   }
@@ -12032,8 +12952,12 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.asyncForEach = exports.getInputList = exports.getArgs = exports.getInputs = exports.tmpNameSync = exports.tmpDir = exports.defaultContext = void 0;
+const sync_1 = __importDefault(__webpack_require__(750));
 const fs = __importStar(__webpack_require__(747));
 const os = __importStar(__webpack_require__(87));
 const path = __importStar(__webpack_require__(622));
@@ -12133,7 +13057,12 @@ function getBuildArgs(inputs, defaultContext, buildxVersion) {
             args.push('--cache-to', cacheTo);
         }));
         yield exports.asyncForEach(inputs.secrets, (secret) => __awaiter(this, void 0, void 0, function* () {
-            args.push('--secret', yield buildx.getSecret(secret));
+            try {
+                args.push('--secret', yield buildx.getSecret(secret));
+            }
+            catch (err) {
+                core.warning(err.message);
+            }
         }));
         if (inputs.githubToken && !buildx.hasGitAuthToken(inputs.secrets) && inputs.context == defaultContext) {
             args.push('--secret', yield buildx.getSecret(`GIT_AUTH_TOKEN=${inputs.githubToken}`));
@@ -12170,14 +13099,27 @@ function getCommonArgs(inputs) {
 }
 function getInputList(name, ignoreComma) {
     return __awaiter(this, void 0, void 0, function* () {
+        let res = [];
         const items = core.getInput(name);
         if (items == '') {
-            return [];
+            return res;
         }
-        return items
-            .split(/\r?\n/)
-            .filter(x => x)
-            .reduce((acc, line) => acc.concat(!ignoreComma ? line.split(',').filter(x => x) : line).map(pat => pat.trim()), []);
+        for (let output of (yield sync_1.default(items, {
+            columns: false,
+            relaxColumnCount: true,
+            skipLinesWithEmptyValues: true
+        }))) {
+            if (output.length == 1) {
+                res.push(output[0]);
+                continue;
+            }
+            else if (!ignoreComma) {
+                res.push(...output);
+                continue;
+            }
+            res.push(output.join(','));
+        }
+        return res.filter(item => item).map(pat => pat.trim());
     });
 }
 exports.getInputList = getInputList;
@@ -12229,15 +13171,18 @@ const compare = __webpack_require__(309)
 //   - If EQ satisfies every C, return true
 //   - Else return false
 // - If GT
-//   - If GT is lower than any > or >= comp in C, return false
+//   - If GT.semver is lower than any > or >= comp in C, return false
 //   - If GT is >=, and GT.semver does not satisfy every C, return false
 // - If LT
-//   - If LT.semver is greater than that of any > comp in C, return false
+//   - If LT.semver is greater than any < or <= comp in C, return false
 //   - If LT is <=, and LT.semver does not satisfy every C, return false
 // - If any C is a = range, and GT or LT are set, return false
 // - Else return true
 
 const subset = (sub, dom, options) => {
+  if (sub === dom)
+    return true
+
   sub = new Range(sub, options)
   dom = new Range(dom, options)
   let sawNonNull = false
@@ -12260,6 +13205,9 @@ const subset = (sub, dom, options) => {
 }
 
 const simpleSubset = (sub, dom, options) => {
+  if (sub === dom)
+    return true
+
   if (sub.length === 1 && sub[0].semver === ANY)
     return dom.length === 1 && dom[0].semver === ANY
 
@@ -12298,6 +13246,7 @@ const simpleSubset = (sub, dom, options) => {
       if (!satisfies(eq, String(c), options))
         return false
     }
+
     return true
   }
 
@@ -12309,7 +13258,7 @@ const simpleSubset = (sub, dom, options) => {
     if (gt) {
       if (c.operator === '>' || c.operator === '>=') {
         higher = higherGT(gt, c, options)
-        if (higher === c)
+        if (higher === c && higher !== gt)
           return false
       } else if (gt.operator === '>=' && !satisfies(gt.semver, String(c), options))
         return false
@@ -12317,7 +13266,7 @@ const simpleSubset = (sub, dom, options) => {
     if (lt) {
       if (c.operator === '<' || c.operator === '<=') {
         lower = lowerLT(lt, c, options)
-        if (lower === c)
+        if (lower === c && lower !== lt)
           return false
       } else if (lt.operator === '<=' && !satisfies(lt.semver, String(c), options))
         return false
@@ -12536,13 +13485,9 @@ const {MAX_LENGTH} = __webpack_require__(293)
 const { re, t } = __webpack_require__(523)
 const SemVer = __webpack_require__(88)
 
+const parseOptions = __webpack_require__(785)
 const parse = (version, options) => {
-  if (!options || typeof options !== 'object') {
-    options = {
-      loose: !!options,
-      includePrerelease: false
-    }
-  }
+  options = parseOptions(options)
 
   if (version instanceof SemVer) {
     return version
@@ -13192,13 +14137,28 @@ class ResizeableBuffer{
     this.buf = Buffer.alloc(size)
   }
   prepend(val){
-    const length = this.length++
-    if(length === this.size){
-      this.resize()
+    if(Buffer.isBuffer(val)){
+      const length = this.length + val.length
+      if(length >= this.size){
+        this.resize()
+        if(length >= this.size){
+          throw Error('INVALID_BUFFER_STATE')
+        }
+      }
+      const buf = this.buf
+      this.buf = Buffer.alloc(this.size)
+      val.copy(this.buf, 0)
+      buf.copy(this.buf, val.length)
+      this.length += val.length
+    }else{
+      const length = this.length++
+      if(length === this.size){
+        this.resize()
+      }
+      const buf = this.clone()
+      this.buf[0] = val
+      buf.copy(this.buf,1, 0, length)
     }
-    const buf = this.clone()
-    this.buf[0] = val
-    buf.copy(this.buf,1, 0, length)
   }
   append(val){
     const length = this.length++
@@ -13217,11 +14177,15 @@ class ResizeableBuffer{
     this.buf.copy(buf,0, 0, length)
     this.buf = buf
   }
-  toString(){
-    return this.buf.slice(0, this.length).toString()
+  toString(encoding){
+    if(encoding){
+      return this.buf.slice(0, this.length).toString(encoding)
+    }else{
+      return Uint8Array.prototype.slice.call(this.buf.slice(0, this.length))
+    }
   }
   toJSON(){
-    return this.toString()
+    return this.toString('utf8')
   }
   reset(){
     this.length = 0
