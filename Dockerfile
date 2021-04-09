@@ -1,6 +1,6 @@
 #syntax=docker/dockerfile:1.1-experimental
 
-FROM node:12 AS deps
+FROM node:12.22-buster-slim AS deps
 WORKDIR /src
 COPY package.json yarn.lock ./
 RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
