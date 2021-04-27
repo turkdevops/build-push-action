@@ -213,6 +213,37 @@ jobs:
         name: Checkout
         uses: actions/checkout@v2
       -
+        name: Stop docker
+        run: |
+          sudo systemctl stop docker
+      -
+        name: Build
+        id: docker_build
+        continue-on-error: true
+        uses: ./
+        with:
+          context: ./test
+          file: ./test/Dockerfile
+      -
+        name: Check
+        run: |
+          echo "${{ toJson(steps.docker_build) }}"
+          if [ "${{ steps.docker_build.outcome }}" != "failure" ] || [ "${{ steps.docker_build.conclusion }}" != "success" ]; then
+            echo "::error::Should have failed"
+            exit 1
+          fi
+      -
+        name: Dump context
+        if: always()
+        uses: crazy-max/ghaction-dump-context@v1
+
+  error-buildx:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v2
+      -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v1
       -
@@ -244,12 +275,6 @@ jobs:
 
   docker-driver:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        push:
-          - true
-          - false
     services:
       registry:
         image: registry:2
@@ -262,24 +287,12 @@ jobs:
       -
         name: Build
         id: docker_build
-        continue-on-error: ${{ matrix.push }}
         uses: ./
         with:
           context: ./test
           file: ./test/Dockerfile
-          push: ${{ matrix.push }}
+          push: true
           tags: localhost:5000/name/app:latest
-      -
-        name: Check
-        run: |
-          echo "${{ toJson(steps.docker_build) }}"
-          if [ "${{ matrix.push }}" = "false" ]; then
-            exit 0
-          fi
-          if [ "${{ steps.docker_build.outcome }}" != "failure" ] || [ "${{ steps.docker_build.conclusion }}" != "success" ]; then
-            echo "::error::Should have failed"
-            exit 1
-          fi
       -
         name: Dump context
         if: always()
@@ -303,6 +316,30 @@ jobs:
         name: Inspect
         run: |
           docker image inspect myimage:latest
+      -
+        name: Dump context
+        if: always()
+        uses: crazy-max/ghaction-dump-context@v1
+
+  network:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v2
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      -
+        name: List networks
+        run: docker network ls
+      -
+        name: Build
+        uses: ./
+        with:
+          context: ./test
+          tags: name/app:latest
+          network: host
       -
         name: Dump context
         if: always()
@@ -344,7 +381,7 @@ jobs:
         uses: ./
         with:
           context: ./test
-          file: ./test/Dockerfile-${{ matrix.dockerfile }}
+          file: ./test/${{ matrix.dockerfile }}.Dockerfile
           builder: ${{ steps.buildx.outputs.name }}
           platforms: linux/amd64,linux/arm64
           push: true
@@ -397,7 +434,7 @@ jobs:
         uses: ./
         with:
           context: ./test
-          file: ./test/Dockerfile-multi
+          file: ./test/multi.Dockerfile
           builder: ${{ steps.buildx.outputs.name }}
           platforms: linux/amd64,linux/arm64
           push: true
@@ -430,7 +467,7 @@ jobs:
         uses: ./
         with:
           context: ./test
-          file: ./test/Dockerfile-multi
+          file: ./test/multi.Dockerfile
           builder: ${{ steps.buildx.outputs.name }}
           platforms: linux/amd64,linux/arm64
           push: true
@@ -507,7 +544,7 @@ jobs:
         uses: ./
         with:
           context: ./test
-          file: ./test/Dockerfile-multi
+          file: ./test/multi.Dockerfile
           builder: ${{ steps.buildx.outputs.name }}
           platforms: linux/amd64,linux/arm64
           push: true
@@ -572,7 +609,7 @@ jobs:
         uses: ./
         with:
           context: ./test
-          file: ./test/Dockerfile-multi
+          file: ./test/multi.Dockerfile
           builder: ${{ steps.buildx.outputs.name }}
           platforms: linux/amd64,linux/arm64
           push: true

@@ -1,112 +1,8 @@
 # Troubleshooting
 
-* [`auto-push is currently not implemented for docker driver`](#auto-push-is-currently-not-implemented-for-docker-driver)
 * [Cannot push to a registry](#cannot-push-to-a-registry)
-
-## `auto-push is currently not implemented for docker driver`
-
-If you're using the default builder (which uses the docker driver) without using our `setup-buildx-action`, you may
-encounter this error message if you try to push your image:
-
-```
-Run docker/build-push-action@v2
-📣 Buildx version: 0.4.2
-🏃 Starting build...
-/usr/bin/docker buildx build --tag localhost:5000/name/app:latest --iidfile /tmp/docker-build-push-eYl8PB/iidfile --file ./test/Dockerfile --push ./test
-auto-push is currently not implemented for docker driver
-Error: buildx call failed with: auto-push is currently not implemented for docker driver
-```
-
-While waiting for an implementation to be done on buildx/buildkit, you have the following possibilities
-to solve this atm:
-
-### With `docker-container` driver and `setup-buildx`
-
-> Recommended solution
-
-```yaml
-jobs:
-  build:
-    -
-      name: Checkout
-      uses: actions/checkout@v2
-    -
-      name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-    -
-      name: Login
-      uses: docker/login-action@v1
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ env.USER }}
-        password: ${{ secrets.PASSWORD }}
-    -
-      name: Build and push
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        tags: ${{ env.REGISTRY }}/myapp:latest
-        push: true
-```
-
-### With `docker` driver
-
-```yaml
-jobs:
-  build:
-    -
-      name: Checkout
-      uses: actions/checkout@v2
-    -
-      name: Login
-      uses: docker/login-action@v1
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ env.USER }}
-        password: ${{ secrets.PASSWORD }}
-    -
-      name: Build
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        tags: ${{ env.REGISTRY }}/myapp:latest
-        load: true
-    -
-      name: Push
-      run: docker push ${{ env.REGISTRY }}/myapp:latest
-```
-
-### With `docker` driver and `setup-buildx`
-
-```yaml
-jobs:
-  build:
-    -
-      name: Checkout
-      uses: actions/checkout@v2
-    -
-      name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-      with:
-        driver: docker
-    -
-      name: Login
-      uses: docker/login-action@v1
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ env.USER }}
-        password: ${{ secrets.PASSWORD }}
-    -
-      name: Build
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        tags: ${{ env.REGISTRY }}/myapp:latest
-        load: true
-    -
-      name: Push
-      run: docker push ${{ env.REGISTRY }}/myapp:latest
-```
+  * [BuildKit container logs](#buildkit-container-logs)
+  * [With containerd](#with-containerd)
 
 ## Cannot push to a registry
 
@@ -122,16 +18,12 @@ These issues are not directly related to this action but are rather linked to [b
 [buildkit](https://github.com/moby/buildkit), [containerd](https://github.com/containerd/containerd) or the registry
 on which you're pushing your image. The quality of error message depends on the registry and are usually not very informative.
 
-To help you solve this, you should first enable debugging in the
-[setup-buildx action step](https://github.com/docker/setup-buildx-action):
+### BuildKit container logs
 
-```yaml
-  -
-    name: Set up Docker Buildx
-    uses: docker/setup-buildx-action@v1
-    with:
-      buildkitd-flags: --debug
-```
+To help you solve this, you have to [enable debugging in the setup-buildx](https://github.com/docker/setup-buildx-action#buildkit-container-logs)
+action step and attach BuildKit container logs to your issue.
+
+### With containerd
 
 Next you can test pushing with [containerd action](https://github.com/crazy-max/ghaction-setup-containerd) using the
 following workflow. If it works then open an issue on [buildkit](https://github.com/moby/buildkit) repository.
@@ -165,8 +57,7 @@ jobs:
         uses: docker/build-push-action@v2
         with:
           context: .
-          file: ./Dockerfile
-          platforms: linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,linux/ppc64le,linux/s390x
+          platforms: linux/amd64,linux/arm64
           tags: docker.io/user/app:latest
           outputs: type=oci,dest=/tmp/image.tar
       -

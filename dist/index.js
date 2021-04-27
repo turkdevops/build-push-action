@@ -2387,7 +2387,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = __importStar(__webpack_require__(747));
-const os = __importStar(__webpack_require__(87));
 const buildx = __importStar(__webpack_require__(295));
 const context = __importStar(__webpack_require__(842));
 const exec = __importStar(__webpack_require__(757));
@@ -2396,18 +2395,20 @@ const core = __importStar(__webpack_require__(186));
 function run() {
     return __awaiter(this, void 0, void 0, function* () {
         try {
-            if (os.platform() !== 'linux') {
-                throw new Error(`Only supported on linux platform`);
-            }
+            core.startGroup(`Docker info`);
+            yield exec.exec('docker', ['version']);
+            yield exec.exec('docker', ['info']);
+            core.endGroup();
             if (!(yield buildx.isAvailable())) {
-                throw new Error(`Buildx is required. See https://github.com/docker/setup-buildx-action to set up buildx.`);
+                core.setFailed(`Docker buildx is required. See https://github.com/docker/setup-buildx-action to set up buildx.`);
+                return;
             }
             stateHelper.setTmpDir(context.tmpDir());
             const buildxVersion = yield buildx.getVersion();
-            core.info(`📣 Buildx version: ${buildxVersion}`);
+            core.info(`Using buildx ${buildxVersion}`);
             const defContext = context.defaultContext();
             let inputs = yield context.getInputs(defContext);
-            core.info(`🏃 Starting build...`);
+            core.info(`Building...`);
             const args = yield context.getArgs(inputs, defContext, buildxVersion);
             yield exec.exec('docker', args).then(res => {
                 if (res.stderr != '' && !res.success) {
@@ -2416,9 +2417,10 @@ function run() {
             });
             const imageID = yield buildx.getImageID();
             if (imageID) {
-                core.info('🛒 Extracting digest...');
+                core.startGroup(`Extracting digest`);
                 core.info(`${imageID}`);
-                core.setOutput('digest', imageID);
+                context.setOutput('digest', imageID);
+                core.endGroup();
             }
         }
         catch (error) {
@@ -2429,8 +2431,9 @@ function run() {
 function cleanup() {
     return __awaiter(this, void 0, void 0, function* () {
         if (stateHelper.tmpDir.length > 0) {
-            core.info(`🚿 Removing temp folder ${stateHelper.tmpDir}`);
+            core.startGroup(`Removing temp folder ${stateHelper.tmpDir}`);
             fs.rmdirSync(stateHelper.tmpDir, { recursive: true });
+            core.endGroup();
         }
     });
 }
@@ -3646,6 +3649,7 @@ exports.getInput = getInput;
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function setOutput(name, value) {
+    process.stdout.write(os.EOL);
     command_1.issueCommand('set-output', { name }, value);
 }
 exports.setOutput = setOutput;
@@ -4581,7 +4585,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseVersion = exports.getVersion = exports.isAvailable = exports.hasGitAuthToken = exports.isLocalOrTarExporter = exports.getSecret = exports.getImageID = exports.getImageIDFile = void 0;
+exports.parseVersion = exports.getVersion = exports.isAvailable = exports.hasGitAuthToken = exports.isLocalOrTarExporter = exports.getSecret = exports.getSecretFile = exports.getSecretString = exports.getImageID = exports.getImageIDFile = void 0;
 const sync_1 = __importDefault(__webpack_require__(750));
 const fs_1 = __importDefault(__webpack_require__(747));
 const path_1 = __importDefault(__webpack_require__(622));
@@ -4604,18 +4608,36 @@ function getImageID() {
     });
 }
 exports.getImageID = getImageID;
-function getSecret(kvp) {
+function getSecretString(kvp) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return getSecret(kvp, false);
+    });
+}
+exports.getSecretString = getSecretString;
+function getSecretFile(kvp) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return getSecret(kvp, true);
+    });
+}
+exports.getSecretFile = getSecretFile;
+function getSecret(kvp, file) {
     return __awaiter(this, void 0, void 0, function* () {
         const delimiterIndex = kvp.indexOf('=');
         const key = kvp.substring(0, delimiterIndex);
-        const value = kvp.substring(delimiterIndex + 1);
+        let value = kvp.substring(delimiterIndex + 1);
         if (key.length == 0 || value.length == 0) {
             throw new Error(`${kvp} is not a valid secret`);
+        }
+        if (file) {
+            if (!fs_1.default.existsSync(value)) {
+                throw new Error(`secret file ${value} not found`);
+            }
+            value = fs_1.default.readFileSync(value, { encoding: 'utf-8' });
         }
         const secretFile = context.tmpNameSync({
             tmpdir: context.tmpDir()
         });
-        yield fs_1.default.writeFileSync(secretFile, value);
+        fs_1.default.writeFileSync(secretFile, value);
         return `id=${key},src=${secretFile}`;
     });
 }
@@ -4676,7 +4698,7 @@ function parseVersion(stdout) {
     return __awaiter(this, void 0, void 0, function* () {
         const matches = /\sv?([0-9.]+)/.exec(stdout);
         if (!matches) {
-            throw new Error(`Cannot parse Buildx version`);
+            throw new Error(`Cannot parse buildx version`);
         }
         return semver.clean(matches[1]);
     });
@@ -11668,10 +11690,14 @@ additional information.
 const { Transform } = __webpack_require__(413)
 const ResizeableBuffer = __webpack_require__(942)
 
+// white space characters
+// https://en.wikipedia.org/wiki/Whitespace_character
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_Expressions/Character_Classes#Types
+// \f\n\r\t\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff
 const tab = 9
-const nl = 10
+const nl = 10 // \n, 0x0A in hexadecimal, 10 in decimal
 const np = 12
-const cr = 13
+const cr = 13 // \r, 0x0D in hexadécimal, 13 in decimal
 const space = 32
 const boms = {
   // Note, the following are equals:
@@ -11859,6 +11885,27 @@ class Parser extends Transform {
       }else{
         throw new Error(`Invalid Option: from_line must be an integer, got ${JSON.stringify(opts.from_line)}`)
       }
+    }
+    // Normalize options `ignore_last_delimiters`
+    if(options.ignore_last_delimiters === undefined || options.ignore_last_delimiters === null){
+      options.ignore_last_delimiters = false
+    }else if(typeof options.ignore_last_delimiters === 'number'){
+      options.ignore_last_delimiters = Math.floor(options.ignore_last_delimiters)
+      if(options.ignore_last_delimiters === 0){
+        options.ignore_last_delimiters = false
+      }
+    }else if(typeof options.ignore_last_delimiters !== 'boolean'){
+      throw new CsvError('CSV_INVALID_OPTION_IGNORE_LAST_DELIMITERS', [
+        'Invalid option `ignore_last_delimiters`:',
+        'the value must be a boolean value or an integer,',
+        `got ${JSON.stringify(options.ignore_last_delimiters)}`
+      ], options)
+    }
+    if(options.ignore_last_delimiters === true && options.columns === false){
+      throw new CsvError('CSV_IGNORE_LAST_DELIMITERS_REQUIRES_COLUMNS', [
+        'The option `ignore_last_delimiters`',
+        'requires the activation of the `columns` option'
+      ], options)
     }
     // Normalize option `info`
     if(options.info === undefined || options.info === null || options.info === false){
@@ -12177,7 +12224,7 @@ class Parser extends Transform {
       }
       // Auto discovery of record_delimiter, unix, mac and windows supported
       if(this.state.quoting === false && record_delimiter.length === 0){
-        const record_delimiterCount = this.__autoDiscoverRowDelimiter(buf, pos)
+        const record_delimiterCount = this.__autoDiscoverRecordDelimiter(buf, pos)
         if(record_delimiterCount){
           record_delimiter = this.options.record_delimiter
         }
@@ -12218,12 +12265,12 @@ class Parser extends Transform {
             const isNextChrTrimable = rtrim && this.__isCharTrimable(nextChr)
             const isNextChrComment = comment !== null && this.__compareBytes(comment, buf, pos+quote.length, nextChr)
             const isNextChrDelimiter = this.__isDelimiter(buf, pos+quote.length, nextChr)
-            const isNextChrRowDelimiter = record_delimiter.length === 0 ? this.__autoDiscoverRowDelimiter(buf, pos+quote.length) : this.__isRecordDelimiter(nextChr, buf, pos+quote.length)
+            const isNextChrRecordDelimiter = record_delimiter.length === 0 ? this.__autoDiscoverRecordDelimiter(buf, pos+quote.length) : this.__isRecordDelimiter(nextChr, buf, pos+quote.length)
             // Escape a quote
             // Treat next char as a regular character
             if(escape !== null && this.__isEscape(buf, pos, chr) && this.__isQuote(buf, pos + escape.length)){
               pos += escape.length - 1
-            }else if(!nextChr || isNextChrDelimiter || isNextChrRowDelimiter || isNextChrComment || isNextChrTrimable){
+            }else if(!nextChr || isNextChrDelimiter || isNextChrRecordDelimiter || isNextChrComment || isNextChrTrimable){
               this.state.quoting = false
               this.state.wasQuoting = true
               pos += quote.length - 1
@@ -12234,7 +12281,7 @@ class Parser extends Transform {
                   'Invalid Closing Quote:',
                   `got "${String.fromCharCode(nextChr)}"`,
                   `at line ${this.info.lines}`,
-                  'instead of delimiter, row delimiter, trimable character',
+                  'instead of delimiter, record delimiter, trimable character',
                   '(if activated) or comment',
                 ], this.options, this.__context())
               )
@@ -12275,25 +12322,24 @@ class Parser extends Transform {
               this.info.comment_lines++
               // Skip full comment line
             }else{
+              // Activate records emition if above from_line
+              if(this.state.enabled === false && this.info.lines + (this.state.wasRowDelimiter === true ? 1: 0) >= from_line){
+                this.state.enabled = true
+                this.__resetField()
+                this.__resetRecord()
+                pos += recordDelimiterLength - 1
+                continue
+              }
               // Skip if line is empty and skip_empty_lines activated
               if(skip_empty_lines === true && this.state.wasQuoting === false && this.state.record.length === 0 && this.state.field.length === 0){
                 this.info.empty_lines++
                 pos += recordDelimiterLength - 1
                 continue
               }
-              // Activate records emition if above from_line
-              if(this.state.enabled === false && this.info.lines + (this.state.wasRowDelimiter === true ? 1: 0 ) >= from_line){
-                this.state.enabled = true
-                this.__resetField()
-                this.__resetRow()
-                pos += recordDelimiterLength - 1
-                continue
-              }else{
-                const errField = this.__onField()
-                if(errField !== undefined) return errField
-                const errRecord = this.__onRow()
-                if(errRecord !== undefined) return errRecord
-              }
+              const errField = this.__onField()
+              if(errField !== undefined) return errField
+              const errRecord = this.__onRecord()
+              if(errRecord !== undefined) return errRecord
               if(to !== -1 && this.info.records >= to){
                 this.state.stop = true
                 this.push(null)
@@ -12366,7 +12412,7 @@ class Parser extends Transform {
         if(this.state.wasQuoting === true || this.state.record.length !== 0 || this.state.field.length !== 0){
           const errField = this.__onField()
           if(errField !== undefined) return errField
-          const errRecord = this.__onRow()
+          const errRecord = this.__onRecord()
           if(errRecord !== undefined) return errRecord
         }else if(this.state.wasRowDelimiter === true){
           this.info.empty_lines++
@@ -12382,21 +12428,17 @@ class Parser extends Transform {
       this.state.wasRowDelimiter = false
     }
   }
-  // Helper to test if a character is a space or a line delimiter
-  __isCharTrimable(chr){
-    return chr === space || chr === tab || chr === cr || chr === nl || chr === np
-  }
-  __onRow(){
+  __onRecord(){
     const {columns, columns_duplicates_to_array, encoding, info, from, relax_column_count, relax_column_count_less, relax_column_count_more, raw, skip_lines_with_empty_values} = this.options
     const {enabled, record} = this.state
     if(enabled === false){
-      return this.__resetRow()
+      return this.__resetRecord()
     }
     // Convert the first line into column names
     const recordLength = record.length
     if(columns === true){
       if(isRecordEmpty(record)){
-        this.__resetRow()
+        this.__resetRecord()
         return
       }
       return this.__firstLineToColumns(record)
@@ -12425,7 +12467,7 @@ class Parser extends Transform {
         ], this.options, this.__context(), {
           record: record,
         })
-      if(relax_column_count === true || 
+      if(relax_column_count === true ||
         (relax_column_count_less === true && recordLength < this.state.expectedRecordLength) ||
         (relax_column_count_more === true && recordLength > this.state.expectedRecordLength) ){
         this.info.invalid_field_length++
@@ -12438,12 +12480,12 @@ class Parser extends Transform {
     }
     if(skip_lines_with_empty_values === true){
       if(isRecordEmpty(record)){
-        this.__resetRow()
+        this.__resetRecord()
         return
       }
     }
     if(this.state.recordHasError === true){
-      this.__resetRow()
+      this.__resetRecord()
       this.state.recordHasError = false
       return
     }
@@ -12455,7 +12497,7 @@ class Parser extends Transform {
         for(let i = 0, l = record.length; i < l; i++){
           if(columns[i] === undefined || columns[i].disabled) continue
           // Turn duplicate columns into an array
-          if (columns_duplicates_to_array === true && obj[columns[i].name]) {
+          if (columns_duplicates_to_array === true && obj[columns[i].name] !== undefined) {
             if (Array.isArray(obj[columns[i].name])) {
               obj[columns[i].name] = obj[columns[i].name].concat(record[i])
             } else {
@@ -12517,7 +12559,7 @@ class Parser extends Transform {
         }
       }
     }
-    this.__resetRow()
+    this.__resetRecord()
   }
   __firstLineToColumns(record){
     const {firstLineToHeaders} = this.state
@@ -12537,13 +12579,13 @@ class Parser extends Transform {
       const normalizedHeaders = normalizeColumnsArray(headers)
       this.state.expectedRecordLength = normalizedHeaders.length
       this.options.columns = normalizedHeaders
-      this.__resetRow()
+      this.__resetRecord()
       return
     }catch(err){
       return err
     }
   }
-  __resetRow(){
+  __resetRecord(){
     if(this.options.raw === true){
       this.state.rawBuffer.reset()
     }
@@ -12616,6 +12658,10 @@ class Parser extends Transform {
     }
     return [undefined, field]
   }
+  // Helper to test if a character is a space or a line delimiter
+  __isCharTrimable(chr){
+    return chr === space || chr === tab || chr === cr || chr === nl || chr === np
+  }
   // Keep it in case we implement the `cast_int` option
   // __isInt(value){
   //   // return Number.isInteger(parseInt(value))
@@ -12642,14 +12688,19 @@ class Parser extends Transform {
       needMoreDataSize,
       // Skip if the remaining buffer smaller than record delimiter
       recordDelimiterMaxLength,
-      // Skip if the remaining buffer can be row delimiter following the closing quote
+      // Skip if the remaining buffer can be record delimiter following the closing quote
       // 1 is for quote.length
       quoting ? (quote.length + recordDelimiterMaxLength) : 0,
     )
     return numOfCharLeft < requiredLength
   }
   __isDelimiter(buf, pos, chr){
-    const {delimiter} = this.options
+    const {delimiter, ignore_last_delimiters} = this.options
+    if(ignore_last_delimiters === true && this.state.record.length === this.options.columns.length - 1){
+      return 0
+    }else if(ignore_last_delimiters !== false && typeof ignore_last_delimiters === 'number' && this.state.record.length === ignore_last_delimiters - 1){
+      return 0
+    }
     loop1: for(let i = 0; i < delimiter.length; i++){
       const del = delimiter[i]
       if(del[0] === chr){
@@ -12704,7 +12755,7 @@ class Parser extends Transform {
     }
     return true
   }
-  __autoDiscoverRowDelimiter(buf, pos){
+  __autoDiscoverRecordDelimiter(buf, pos){
     const {encoding} = this.options
     const chr = buf[pos]
     if(chr === cr){
@@ -12953,7 +13004,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.asyncForEach = exports.getInputList = exports.getArgs = exports.getInputs = exports.tmpNameSync = exports.tmpDir = exports.defaultContext = void 0;
+exports.setOutput = exports.asyncForEach = exports.getInputList = exports.getArgs = exports.getInputs = exports.tmpNameSync = exports.tmpDir = exports.defaultContext = void 0;
 const sync_1 = __importDefault(__webpack_require__(750));
 const fs = __importStar(__webpack_require__(747));
 const os = __importStar(__webpack_require__(87));
@@ -12961,13 +13012,14 @@ const path = __importStar(__webpack_require__(622));
 const semver = __importStar(__webpack_require__(383));
 const tmp = __importStar(__webpack_require__(517));
 const core = __importStar(__webpack_require__(186));
+const command_1 = __webpack_require__(351);
 const github = __importStar(__webpack_require__(438));
 const buildx = __importStar(__webpack_require__(295));
 let _defaultContext, _tmpDir;
 function defaultContext() {
     var _a, _b;
     if (!_defaultContext) {
-        _defaultContext = `https://github.com/${github.context.repo.owner}/${github.context.repo.repo}.git#${(_b = (_a = github.context) === null || _a === void 0 ? void 0 : _a.ref) === null || _b === void 0 ? void 0 : _b.replace(/^refs\//, '')}`;
+        _defaultContext = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${github.context.repo.owner}/${github.context.repo.repo}.git#${(_b = (_a = github.context) === null || _a === void 0 ? void 0 : _a.ref) === null || _b === void 0 ? void 0 : _b.replace(/^refs\//, '')}`;
     }
     return _defaultContext;
 }
@@ -12986,25 +13038,27 @@ exports.tmpNameSync = tmpNameSync;
 function getInputs(defaultContext) {
     return __awaiter(this, void 0, void 0, function* () {
         return {
-            context: core.getInput('context') || defaultContext,
-            file: core.getInput('file') || 'Dockerfile',
-            buildArgs: yield getInputList('build-args', true),
-            labels: yield getInputList('labels', true),
-            tags: yield getInputList('tags'),
-            pull: /true/i.test(core.getInput('pull')),
-            target: core.getInput('target'),
             allow: yield getInputList('allow'),
-            noCache: /true/i.test(core.getInput('no-cache')),
+            buildArgs: yield getInputList('build-args', true),
             builder: core.getInput('builder'),
-            platforms: yield getInputList('platforms'),
-            load: /true/i.test(core.getInput('load')),
-            push: /true/i.test(core.getInput('push')),
-            outputs: yield getInputList('outputs', true),
             cacheFrom: yield getInputList('cache-from', true),
             cacheTo: yield getInputList('cache-to', true),
+            context: core.getInput('context') || defaultContext,
+            file: core.getInput('file'),
+            labels: yield getInputList('labels', true),
+            load: /true/i.test(core.getInput('load')),
+            network: core.getInput('network'),
+            noCache: /true/i.test(core.getInput('no-cache')),
+            outputs: yield getInputList('outputs', true),
+            platforms: yield getInputList('platforms'),
+            pull: /true/i.test(core.getInput('pull')),
+            push: /true/i.test(core.getInput('push')),
             secrets: yield getInputList('secrets', true),
-            githubToken: core.getInput('github-token'),
-            ssh: yield getInputList('ssh')
+            secretFiles: yield getInputList('secret-files', true),
+            ssh: yield getInputList('ssh'),
+            tags: yield getInputList('tags'),
+            target: core.getInput('target'),
+            githubToken: core.getInput('github-token')
         };
     });
 }
@@ -13055,14 +13109,22 @@ function getBuildArgs(inputs, defaultContext, buildxVersion) {
         }));
         yield exports.asyncForEach(inputs.secrets, (secret) => __awaiter(this, void 0, void 0, function* () {
             try {
-                args.push('--secret', yield buildx.getSecret(secret));
+                args.push('--secret', yield buildx.getSecretString(secret));
+            }
+            catch (err) {
+                core.warning(err.message);
+            }
+        }));
+        yield exports.asyncForEach(inputs.secretFiles, (secretFile) => __awaiter(this, void 0, void 0, function* () {
+            try {
+                args.push('--secret', yield buildx.getSecretFile(secretFile));
             }
             catch (err) {
                 core.warning(err.message);
             }
         }));
         if (inputs.githubToken && !buildx.hasGitAuthToken(inputs.secrets) && inputs.context == defaultContext) {
-            args.push('--secret', yield buildx.getSecret(`GIT_AUTH_TOKEN=${inputs.githubToken}`));
+            args.push('--secret', yield buildx.getSecretString(`GIT_AUTH_TOKEN=${inputs.githubToken}`));
         }
         yield exports.asyncForEach(inputs.ssh, (ssh) => __awaiter(this, void 0, void 0, function* () {
             args.push('--ssh', ssh);
@@ -13087,6 +13149,9 @@ function getCommonArgs(inputs) {
         }
         if (inputs.load) {
             args.push('--load');
+        }
+        if (inputs.network) {
+            args.push('--network', inputs.network);
         }
         if (inputs.push) {
             args.push('--push');
@@ -13125,6 +13190,11 @@ exports.asyncForEach = (array, callback) => __awaiter(void 0, void 0, void 0, fu
         yield callback(array[index], index, array);
     }
 });
+// FIXME: Temp fix https://github.com/actions/toolkit/issues/777
+function setOutput(name, value) {
+    command_1.issueCommand('set-output', { name }, value);
+}
+exports.setOutput = setOutput;
 //# sourceMappingURL=context.js.map
 
 /***/ }),
@@ -13146,22 +13216,30 @@ module.exports = clean
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
 const Range = __webpack_require__(828)
-const { ANY } = __webpack_require__(532)
+const Comparator = __webpack_require__(532)
+const { ANY } = Comparator
 const satisfies = __webpack_require__(55)
 const compare = __webpack_require__(309)
 
 // Complex range `r1 || r2 || ...` is a subset of `R1 || R2 || ...` iff:
-// - Every simple range `r1, r2, ...` is a subset of some `R1, R2, ...`
+// - Every simple range `r1, r2, ...` is a null set, OR
+// - Every simple range `r1, r2, ...` which is not a null set is a subset of
+//   some `R1, R2, ...`
 //
 // Simple range `c1 c2 ...` is a subset of simple range `C1 C2 ...` iff:
 // - If c is only the ANY comparator
 //   - If C is only the ANY comparator, return true
-//   - Else return false
+//   - Else if in prerelease mode, return false
+//   - else replace c with `[>=0.0.0]`
+// - If C is only the ANY comparator
+//   - if in prerelease mode, return true
+//   - else replace C with `[>=0.0.0]`
 // - Let EQ be the set of = comparators in c
 // - If EQ is more than one, return true (null set)
 // - Let GT be the highest > or >= comparator in c
 // - Let LT be the lowest < or <= comparator in c
 // - If GT and LT, and GT.semver > LT.semver, return true (null set)
+// - If any C is a = range, and GT or LT are set, return false
 // - If EQ
 //   - If GT, and EQ does not satisfy GT, return true (null set)
 //   - If LT, and EQ does not satisfy LT, return true (null set)
@@ -13170,13 +13248,16 @@ const compare = __webpack_require__(309)
 // - If GT
 //   - If GT.semver is lower than any > or >= comp in C, return false
 //   - If GT is >=, and GT.semver does not satisfy every C, return false
+//   - If GT.semver has a prerelease, and not in prerelease mode
+//     - If no C has a prerelease and the GT.semver tuple, return false
 // - If LT
 //   - If LT.semver is greater than any < or <= comp in C, return false
 //   - If LT is <=, and LT.semver does not satisfy every C, return false
-// - If any C is a = range, and GT or LT are set, return false
+//   - If GT.semver has a prerelease, and not in prerelease mode
+//     - If no C has a prerelease and the LT.semver tuple, return false
 // - Else return true
 
-const subset = (sub, dom, options) => {
+const subset = (sub, dom, options = {}) => {
   if (sub === dom)
     return true
 
@@ -13205,8 +13286,21 @@ const simpleSubset = (sub, dom, options) => {
   if (sub === dom)
     return true
 
-  if (sub.length === 1 && sub[0].semver === ANY)
-    return dom.length === 1 && dom[0].semver === ANY
+  if (sub.length === 1 && sub[0].semver === ANY) {
+    if (dom.length === 1 && dom[0].semver === ANY)
+      return true
+    else if (options.includePrerelease)
+      sub = [ new Comparator('>=0.0.0-0') ]
+    else
+      sub = [ new Comparator('>=0.0.0') ]
+  }
+
+  if (dom.length === 1 && dom[0].semver === ANY) {
+    if (options.includePrerelease)
+      return true
+    else
+      dom = [ new Comparator('>=0.0.0') ]
+  }
 
   const eqSet = new Set()
   let gt, lt
@@ -13249,10 +13343,32 @@ const simpleSubset = (sub, dom, options) => {
 
   let higher, lower
   let hasDomLT, hasDomGT
+  // if the subset has a prerelease, we need a comparator in the superset
+  // with the same tuple and a prerelease, or it's not a subset
+  let needDomLTPre = lt &&
+    !options.includePrerelease &&
+    lt.semver.prerelease.length ? lt.semver : false
+  let needDomGTPre = gt &&
+    !options.includePrerelease &&
+    gt.semver.prerelease.length ? gt.semver : false
+  // exception: <1.2.3-0 is the same as <1.2.3
+  if (needDomLTPre && needDomLTPre.prerelease.length === 1 &&
+      lt.operator === '<' && needDomLTPre.prerelease[0] === 0) {
+    needDomLTPre = false
+  }
+
   for (const c of dom) {
     hasDomGT = hasDomGT || c.operator === '>' || c.operator === '>='
     hasDomLT = hasDomLT || c.operator === '<' || c.operator === '<='
     if (gt) {
+      if (needDomGTPre) {
+        if (c.semver.prerelease && c.semver.prerelease.length &&
+            c.semver.major === needDomGTPre.major &&
+            c.semver.minor === needDomGTPre.minor &&
+            c.semver.patch === needDomGTPre.patch) {
+          needDomGTPre = false
+        }
+      }
       if (c.operator === '>' || c.operator === '>=') {
         higher = higherGT(gt, c, options)
         if (higher === c && higher !== gt)
@@ -13261,6 +13377,14 @@ const simpleSubset = (sub, dom, options) => {
         return false
     }
     if (lt) {
+      if (needDomLTPre) {
+        if (c.semver.prerelease && c.semver.prerelease.length &&
+            c.semver.major === needDomLTPre.major &&
+            c.semver.minor === needDomLTPre.minor &&
+            c.semver.patch === needDomLTPre.patch) {
+          needDomLTPre = false
+        }
+      }
       if (c.operator === '<' || c.operator === '<=') {
         lower = lowerLT(lt, c, options)
         if (lower === c && lower !== lt)
@@ -13279,6 +13403,12 @@ const simpleSubset = (sub, dom, options) => {
     return false
 
   if (lt && hasDomGT && !gt && gtltComp !== 0)
+    return false
+
+  // we needed a prerelease range in a specific tuple, but didn't get one
+  // then this isn't a subset.  eg >=1.2.3-pre is not a subset of >=1.0.0,
+  // because it includes prereleases in the 1.2.3 tuple
+  if (needDomGTPre || needDomLTPre)
     return false
 
   return true

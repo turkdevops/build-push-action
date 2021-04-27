@@ -6,6 +6,7 @@ import * as semver from 'semver';
 import * as tmp from 'tmp';
 
 import * as core from '@actions/core';
+import {issueCommand} from '@actions/core/lib/command';
 import * as github from '@actions/github';
 
 import * as buildx from './buildx';
@@ -13,30 +14,32 @@ import * as buildx from './buildx';
 let _defaultContext, _tmpDir: string;
 
 export interface Inputs {
-  context: string;
-  file: string;
-  buildArgs: string[];
-  labels: string[];
-  tags: string[];
-  pull: boolean;
-  target: string;
   allow: string[];
-  noCache: boolean;
+  buildArgs: string[];
   builder: string;
-  platforms: string[];
-  load: boolean;
-  push: boolean;
-  outputs: string[];
   cacheFrom: string[];
   cacheTo: string[];
+  context: string;
+  file: string;
+  labels: string[];
+  load: boolean;
+  network: string;
+  noCache: boolean;
+  outputs: string[];
+  platforms: string[];
+  pull: boolean;
+  push: boolean;
   secrets: string[];
-  githubToken: string;
+  secretFiles: string[];
   ssh: string[];
+  tags: string[];
+  target: string;
+  githubToken: string;
 }
 
 export function defaultContext(): string {
   if (!_defaultContext) {
-    _defaultContext = `https://github.com/${github.context.repo.owner}/${
+    _defaultContext = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${github.context.repo.owner}/${
       github.context.repo.repo
     }.git#${github.context?.ref?.replace(/^refs\//, '')}`;
   }
@@ -56,25 +59,27 @@ export function tmpNameSync(options?: tmp.TmpNameOptions): string {
 
 export async function getInputs(defaultContext: string): Promise<Inputs> {
   return {
-    context: core.getInput('context') || defaultContext,
-    file: core.getInput('file') || 'Dockerfile',
-    buildArgs: await getInputList('build-args', true),
-    labels: await getInputList('labels', true),
-    tags: await getInputList('tags'),
-    pull: /true/i.test(core.getInput('pull')),
-    target: core.getInput('target'),
     allow: await getInputList('allow'),
-    noCache: /true/i.test(core.getInput('no-cache')),
+    buildArgs: await getInputList('build-args', true),
     builder: core.getInput('builder'),
-    platforms: await getInputList('platforms'),
-    load: /true/i.test(core.getInput('load')),
-    push: /true/i.test(core.getInput('push')),
-    outputs: await getInputList('outputs', true),
     cacheFrom: await getInputList('cache-from', true),
     cacheTo: await getInputList('cache-to', true),
+    context: core.getInput('context') || defaultContext,
+    file: core.getInput('file'),
+    labels: await getInputList('labels', true),
+    load: /true/i.test(core.getInput('load')),
+    network: core.getInput('network'),
+    noCache: /true/i.test(core.getInput('no-cache')),
+    outputs: await getInputList('outputs', true),
+    platforms: await getInputList('platforms'),
+    pull: /true/i.test(core.getInput('pull')),
+    push: /true/i.test(core.getInput('push')),
     secrets: await getInputList('secrets', true),
-    githubToken: core.getInput('github-token'),
-    ssh: await getInputList('ssh')
+    secretFiles: await getInputList('secret-files', true),
+    ssh: await getInputList('ssh'),
+    tags: await getInputList('tags'),
+    target: core.getInput('target'),
+    githubToken: core.getInput('github-token')
   };
 }
 
@@ -123,13 +128,20 @@ async function getBuildArgs(inputs: Inputs, defaultContext: string, buildxVersio
   });
   await asyncForEach(inputs.secrets, async secret => {
     try {
-      args.push('--secret', await buildx.getSecret(secret));
+      args.push('--secret', await buildx.getSecretString(secret));
+    } catch (err) {
+      core.warning(err.message);
+    }
+  });
+  await asyncForEach(inputs.secretFiles, async secretFile => {
+    try {
+      args.push('--secret', await buildx.getSecretFile(secretFile));
     } catch (err) {
       core.warning(err.message);
     }
   });
   if (inputs.githubToken && !buildx.hasGitAuthToken(inputs.secrets) && inputs.context == defaultContext) {
-    args.push('--secret', await buildx.getSecret(`GIT_AUTH_TOKEN=${inputs.githubToken}`));
+    args.push('--secret', await buildx.getSecretString(`GIT_AUTH_TOKEN=${inputs.githubToken}`));
   }
   await asyncForEach(inputs.ssh, async ssh => {
     args.push('--ssh', ssh);
@@ -153,6 +165,9 @@ async function getCommonArgs(inputs: Inputs): Promise<Array<string>> {
   }
   if (inputs.load) {
     args.push('--load');
+  }
+  if (inputs.network) {
+    args.push('--network', inputs.network);
   }
   if (inputs.push) {
     args.push('--push');
@@ -191,3 +206,8 @@ export const asyncForEach = async (array, callback) => {
     await callback(array[index], index, array);
   }
 };
+
+// FIXME: Temp fix https://github.com/actions/toolkit/issues/777
+export function setOutput(name: string, value: any): void {
+  issueCommand('set-output', {name}, value);
+}

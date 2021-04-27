@@ -7,12 +7,12 @@
 * Rename `dockerfile` input to `file` for consistency with other Docker build tools
 * Rename `always_pull` input to `pull` for consistency with other Docker build tools
 * Add `builder` input to be able to choose a builder instance through our [setup-buildx action](https://github.com/docker/setup-buildx-action)
-* Add [`platforms`](https://github.com/docker/buildx#---platformvaluevalue) input to support multi-platform builds
-* Add [`allow`](https://github.com/docker/buildx#--allowentitlement) input
-* Add [`load`](https://github.com/docker/buildx#--load) input
-* Add [`outputs`](https://github.com/docker/buildx#-o---outputpath-typetypekeyvalue) input
-* Add [`cache-from`](https://github.com/docker/buildx#--cache-fromnametypetypekeyvalue) input (`cache_froms` removed)
-* Add [`cache-to`](https://github.com/docker/buildx#--cache-tonametypetypekeyvalue) input
+* Add `platforms` input to support multi-platform builds
+* Add `allow` input
+* Add `load` input
+* Add `outputs` input
+* Add `cache-from` input (`cache_froms` removed)
+* Add `cache-to` input
 * Rename `build_args` input to `build-args` for consistency with other Docker build tools
 * Add `secrets` input
 * Review `tags` input
@@ -63,7 +63,6 @@ steps:
     uses: docker/build-push-action@v2
     with:
       context: .
-      file: ./Dockerfile
       pull: true
       push: true
       build-args: |
@@ -136,7 +135,6 @@ steps:
     uses: docker/build-push-action@v2
     with:
       context: .
-      file: ./Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
       tags: ${{ steps.prep.outputs.tags }}
       labels: |
@@ -145,5 +143,5 @@ steps:
         org.opencontainers.image.revision=${{ github.sha }}
 ```
 
-> You can also use the [Docker meta action](https://github.com/crazy-max/ghaction-docker-meta) to handle tags and
-> labels based on GitHub actions events and Git metadata. A workflow example is available in the [README](README.md#handle-tags-and-labels).
+> You can also use the [Docker meta action to handle tags and labels](docs/advanced/tags-labels.md) based on GitHub
+> actions events and Git metadata.

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 import * as context from '../src/context';
@@ -147,7 +148,6 @@ describe('getArgs', () => {
         'buildx',
         'build',
         '--iidfile', '/tmp/.docker-build-push-jest/iidfile',
-        '--file', 'Dockerfile',
         '.'
       ]
     ],
@@ -162,7 +162,6 @@ describe('getArgs', () => {
         '--build-arg', 'MY_ARG=val1,val2,val3',
         '--build-arg', 'ARG=val',
         '--iidfile', '/tmp/.docker-build-push-jest/iidfile',
-        '--file', 'Dockerfile',
         'https://github.com/docker/build-push-action.git#test-jest'
       ]
     ],
@@ -177,7 +176,6 @@ describe('getArgs', () => {
         '--tag', 'name/app:7.4',
         '--tag', 'name/app:latest',
         '--iidfile', '/tmp/.docker-build-push-jest/iidfile',
-        '--file', 'Dockerfile',
         'https://github.com/docker/build-push-action.git#test-jest'
       ]
     ],
@@ -194,7 +192,6 @@ describe('getArgs', () => {
         '--label', 'org.opencontainers.image.title=buildkit',
         '--label', 'org.opencontainers.image.description=concurrent, cache-efficient, and Dockerfile-agnostic builder toolkit',
         '--output', 'type=local,dest=./release-out',
-        '--file', 'Dockerfile',
         '.'
       ]
     ],
@@ -208,7 +205,6 @@ describe('getArgs', () => {
         'buildx',
         'build',
         '--platform', 'linux/amd64,linux/arm64',
-        '--file', 'Dockerfile',
         '.'
       ]
     ],
@@ -221,7 +217,6 @@ describe('getArgs', () => {
         'buildx',
         'build',
         '--iidfile', '/tmp/.docker-build-push-jest/iidfile',
-        '--file', 'Dockerfile',
         '.'
       ]
     ],
@@ -236,7 +231,6 @@ describe('getArgs', () => {
         'build',
         '--iidfile', '/tmp/.docker-build-push-jest/iidfile',
         '--secret', 'id=GIT_AUTH_TOKEN,src=/tmp/.docker-build-push-jest/.tmpname-jest',
-        '--file', 'Dockerfile',
         '.'
       ]
     ],
@@ -251,7 +245,6 @@ describe('getArgs', () => {
         'build',
         '--output', '.',
         '--secret', 'id=GIT_AUTH_TOKEN,src=/tmp/.docker-build-push-jest/.tmpname-jest',
-        '--file', 'Dockerfile',
         'https://github.com/docker/build-push-action.git#test-jest'
       ]
     ],
@@ -342,6 +335,29 @@ ccc`],
         '--secret', 'id=EMPTYLINE,src=/tmp/.docker-build-push-jest/.tmpname-jest',
         '--file', './test/Dockerfile',
         '--builder', 'builder-git-context-2',
+        '--push',
+        'https://github.com/docker/build-push-action.git#heads/master'
+      ]
+    ],
+    [
+      '0.5.1',
+      new Map<string, string>([
+        ['context', 'https://github.com/docker/build-push-action.git#heads/master'],
+        ['tag', 'localhost:5000/name/app:latest'],
+        ['secret-files', `MY_SECRET=${path.join(__dirname, 'fixtures', 'secret.txt').split(path.sep).join(path.posix.sep)}`],
+        ['file', './test/Dockerfile'],
+        ['builder', 'builder-git-context-2'],
+        ['network', 'host'],
+        ['push', 'true']
+      ]),
+      [
+        'buildx',
+        'build',
+        '--iidfile', '/tmp/.docker-build-push-jest/iidfile',
+        '--secret', 'id=MY_SECRET,src=/tmp/.docker-build-push-jest/.tmpname-jest',
+        '--file', './test/Dockerfile',
+        '--builder', 'builder-git-context-2',
+        '--network', 'host',
         '--push',
         'https://github.com/docker/build-push-action.git#heads/master'
       ]
@@ -539,6 +555,27 @@ describe('asyncForEach', () => {
   });
 });
 
+describe('setOutput', () => {
+  beforeEach(() => {
+    process.stdout.write = jest.fn();
+  });
+
+  it('setOutput produces the correct command', () => {
+    context.setOutput('some output', 'some value');
+    assertWriteCalls([`::set-output name=some output::some value${os.EOL}`]);
+  });
+
+  it('setOutput handles bools', () => {
+    context.setOutput('some output', false);
+    assertWriteCalls([`::set-output name=some output::false${os.EOL}`]);
+  });
+
+  it('setOutput handles numbers', () => {
+    context.setOutput('some output', 1.01);
+    assertWriteCalls([`::set-output name=some output::1.01${os.EOL}`]);
+  });
+});
+
 // See: https://github.com/actions/toolkit/blob/master/packages/core/src/core.ts#L67
 function getInputName(name: string): string {
   return `INPUT_${name.replace(/ /g, '_').toUpperCase()}`;
@@ -546,4 +583,12 @@ function getInputName(name: string): string {
 
 function setInput(name: string, value: string): void {
   process.env[getInputName(name)] = value;
+}
+
+// Assert that process.stdout.write calls called only with the given arguments.
+function assertWriteCalls(calls: string[]): void {
+  expect(process.stdout.write).toHaveBeenCalledTimes(calls.length);
+  for (let i = 0; i < calls.length; i++) {
+    expect(process.stdout.write).toHaveBeenNthCalledWith(i + 1, calls[i]);
+  }
 }
