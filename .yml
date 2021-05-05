@@ -1,0 +1,2 @@
+- name: Docker görüntüleri oluşturun ve aktarın
+  kullanır: docker/build-push-action@v2.4.0
